@@ -1229,6 +1229,808 @@ do
 	XML_Encoders[encoderName] = XML_Encoders[redirectName]
 end
 
+--// made by: numan. converts xml data to binary
+-- ===================== Binary: RBXLX/RBXMX (XML) -> RBXL/RBXM (Binary) =====================
+local BinaryConvert
+do
+	local MAGIC = "<roblox!\137\255\r\n\26\n"
+
+	local ROBLOX_SERVICE_CLASSES = {}
+	for _, name in {
+		"Workspace","Players","Lighting","ReplicatedFirst","ReplicatedStorage",
+		"ServerScriptService","ServerStorage","StarterGui","StarterPack",
+		"StarterPlayer","Teams","SoundService","Chat","LocalizationService",
+		"TestService","VoiceChatService","MaterialService","PhysicsService",
+		"TextChatService","ProximityPromptService","Debris","JointsService",
+		"RunService","InsertService","KeyframeSequenceProvider","ContentProvider",
+		"ContextActionService","TweenService","PathfindingService",
+		"MarketplaceService","BadgeService","GamePassService","SocialService",
+		"FriendService","AssetService","CollectionService","HttpService",
+		"DataStoreService","MessagingService","PolicyService","TeleportService",
+		"GuiService","StarterGear","SharedTableRegistry","ScriptContext",
+		"LogService","AnalyticsService","AvatarEditorService","VRService",
+		"UserInputService","HapticService","GamepadService","OpenCloudService",
+		"MemoryStoreService","NetworkClient","NetworkServer","CookiesService",
+		"SolidModelDataService","NotificationService","AdService",
+	} do
+		ROBLOX_SERVICE_CLASSES[name] = true
+	end
+
+	local ROTATIONS = {
+		[0x02]={1,0,0, 0,1,0, 0,0,1},       [0x03]={1,0,0, 0,0,-1, 0,1,0},
+		[0x05]={1,0,0, 0,-1,0, 0,0,-1},     [0x06]={1,0,0, 0,0,1, 0,-1,0},
+		[0x07]={0,1,0, 1,0,0, 0,0,-1},      [0x09]={0,0,1, 1,0,0, 0,1,0},
+		[0x0A]={0,-1,0, 1,0,0, 0,0,1},      [0x0C]={0,0,-1, 1,0,0, 0,-1,0},
+		[0x0D]={0,1,0, 0,0,1, 1,0,0},       [0x0E]={0,0,-1, 0,1,0, 1,0,0},
+		[0x10]={0,-1,0, 0,0,-1, 1,0,0},     [0x11]={0,0,1, 0,-1,0, 1,0,0},
+		[0x14]={-1,0,0, 0,1,0, 0,0,-1},     [0x15]={-1,0,0, 0,0,1, 0,1,0},
+		[0x17]={-1,0,0, 0,-1,0, 0,0,1},     [0x18]={-1,0,0, 0,0,-1, 0,-1,0},
+		[0x19]={0,1,0, -1,0,0, 0,0,1},      [0x1B]={0,0,-1, -1,0,0, 0,1,0},
+		[0x1C]={0,-1,0, -1,0,0, 0,0,-1},    [0x1E]={0,0,1, -1,0,0, 0,-1,0},
+		[0x1F]={0,1,0, 0,0,-1, -1,0,0},     [0x20]={0,0,1, 0,1,0, -1,0,0},
+		[0x22]={0,-1,0, 0,0,1, -1,0,0},     [0x23]={0,0,-1, 0,-1,0, -1,0,0},
+	}
+
+	local FORCE_CONTENT_ID_STRING = {}
+	for _, p in {
+		{"Animation","AnimationId"},{"Sound","SoundId"},{"Decal","Texture"},
+		{"Decal","ColorMap"},{"Decal","MetalnessMap"},{"Decal","NormalMap"},{"Decal","RoughnessMap"},
+		{"Texture","Texture"},{"MeshPart","MeshId"},{"SpecialMesh","MeshId"},{"SpecialMesh","TextureId"},
+		{"FileMesh","MeshId"},{"FileMesh","TextureId"},{"Shirt","ShirtTemplate"},{"Pants","PantsTemplate"},
+		{"ShirtGraphic","Graphic"},{"ClothingAssetBase","ClothingAssetId"},
+	} do
+		FORCE_CONTENT_ID_STRING[p[1] .. ":" .. p[2]] = true
+	end
+
+	local FORCE_CONTENT_STRUCT = {}
+	for _, p in {
+		{"SurfaceAppearance","ColorMapContent"},{"SurfaceAppearance","NormalMapContent"},
+		{"SurfaceAppearance","RoughnessMapContent"},{"SurfaceAppearance","MetalnessMapContent"},
+		{"SurfaceAppearance","EmissiveMaskContent"},{"SurfaceAppearance","TextureContent"},
+	} do
+		FORCE_CONTENT_STRUCT[p[1] .. ":" .. p[2]] = true
+	end
+
+	local PROPERTY_TYPE_OVERRIDES = { TeamColor = "BrickColor", BrickColor = "BrickColor" }
+
+	-- >> byte helpers
+	local function u32b(n)
+		local b = buffer.create(4); buffer.writeu32(b, 0, n); return buffer.tostring(b)
+	end
+	local function u16b(n)
+		local b = buffer.create(2); buffer.writeu16(b, 0, n); return buffer.tostring(b)
+	end
+	local function i16b(n)
+		local b = buffer.create(2); buffer.writei16(b, 0, n); return buffer.tostring(b)
+	end
+	local function f32b(x)
+		local b = buffer.create(4); buffer.writef32(b, 0, x); return buffer.tostring(b)
+	end
+	local function f64b(x)
+		local b = buffer.create(8); buffer.writef64(b, 0, x); return buffer.tostring(b)
+	end
+	local function stringb(s)
+		s = s or ""
+		return u32b(#s) .. s
+	end
+	local function beU32(n)
+		local b = buffer.create(4)
+		buffer.writeu8(b, 0, bit32.band(bit32.rshift(n, 24), 0xFF))
+		buffer.writeu8(b, 1, bit32.band(bit32.rshift(n, 16), 0xFF))
+		buffer.writeu8(b, 2, bit32.band(bit32.rshift(n, 8), 0xFF))
+		buffer.writeu8(b, 3, bit32.band(n, 0xFF))
+		return buffer.tostring(b)
+	end
+	local function u64BE(n)
+		local hi = math.floor(n / 4294967296)
+		local lo = n % 4294967296
+		return beU32(hi) .. beU32(lo)
+	end
+	local function f32Bits(x)
+		local b = buffer.create(4)
+		buffer.writef32(b, 0, x)
+		return buffer.readu32(b, 0)
+	end
+	local function rotateBits(bits)
+		return bit32.bor(bit32.lshift(bits, 1), bit32.rshift(bits, 31))
+	end
+	local function transformI32(n)
+		return bit32.bxor(bit32.lshift(n, 1), bit32.arshift(n, 31))
+	end
+	local function transformI64(n)
+		if n < 0 then return (-n * 2) - 1 else return n * 2 end
+	end
+
+	local function interleaveFixed(parts, width)
+		local n = #parts
+		if n == 0 then return "" end
+		local outBytes = table.create(n * width)
+		for j = 0, width - 1 do
+			for i = 1, n do
+				outBytes[j * n + i] = string.byte(parts[i], j + 1)
+			end
+		end
+		local chars = table.create(#outBytes)
+		for idx = 1, #outBytes do chars[idx] = string.char(outBytes[idx]) end
+		return table.concat(chars)
+	end
+
+	local function encodeReferents(values)
+		local last, parts = 0, {}
+		for idx, v in ipairs(values) do
+			parts[idx] = beU32(transformI32(v - last))
+			last = v
+		end
+		return interleaveFixed(parts, 4)
+	end
+	local function interleavedI32(values)
+		local parts = {}
+		for idx, v in ipairs(values) do parts[idx] = beU32(transformI32(v)) end
+		return interleaveFixed(parts, 4)
+	end
+	local function interleavedU32(values)
+		local parts = {}
+		for idx, v in ipairs(values) do parts[idx] = beU32(v) end
+		return interleaveFixed(parts, 4)
+	end
+	local function interleavedF32(values)
+		local parts = {}
+		for idx, v in ipairs(values) do parts[idx] = beU32(rotateBits(f32Bits(v))) end
+		return interleaveFixed(parts, 4)
+	end
+	local function interleavedI64(values)
+		local parts = {}
+		for idx, v in ipairs(values) do parts[idx] = u64BE(transformI64(v)) end
+		return interleaveFixed(parts, 8)
+	end
+
+	local function lz4LiteralBlock(data)
+		local n = #data
+		local firstByte = bit32.lshift(math.min(n, 15), 4)
+		local parts = { string.char(firstByte) }
+		if n >= 15 then
+			local left = n - 15
+			while left >= 255 do
+				table.insert(parts, string.char(255))
+				left -= 255
+			end
+			table.insert(parts, string.char(left))
+		end
+		table.insert(parts, data)
+		return table.concat(parts)
+	end
+	local function makeChunk(sig, payload, compression)
+		if compression == "none" then
+			return sig .. u32b(0) .. u32b(#payload) .. "\0\0\0\0" .. payload
+		end
+		local compressed = lz4LiteralBlock(payload)
+		return sig .. u32b(#compressed) .. u32b(#payload) .. "\0\0\0\0" .. compressed
+	end
+
+	--// base64 decoding
+	local B64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	local B64_LOOKUP = {}
+	for i = 1, #B64_CHARS do B64_LOOKUP[string.byte(B64_CHARS, i)] = i - 1 end
+	local function base64Decode(data)
+		local bytes = {}
+		local bitBuffer, bitCount = 0, 0
+		for i = 1, #data do
+			local c = string.byte(data, i)
+			if c == 61 then break end
+			local val = B64_LOOKUP[c]
+			if val then
+				bitBuffer = bit32.bor(bit32.lshift(bitBuffer, 6), val)
+				bitCount += 6
+				if bitCount >= 8 then
+					bitCount -= 8
+					table.insert(bytes, string.char(bit32.band(bit32.rshift(bitBuffer, bitCount), 0xFF)))
+				end
+			end
+		end
+		return table.concat(bytes)
+	end
+
+	--// xml parser
+	local ENTITY_MAP = { amp = "&", lt = "<", gt = ">", quot = '"', apos = "'" }
+	local function unescapeXml(s)
+		return (s:gsub("&(#?)(%w+);", function(hash, body)
+			if hash == "#" then
+				local n = tonumber(body)
+				return n and string.char(n) or ""
+			end
+			return ENTITY_MAP[body] or ("&" .. body .. ";")
+		end))
+	end
+
+	local function parseXml(xmlStr)
+		local len = #xmlStr
+		local pos = 1
+		local root = { tag = "#root", children = {} }
+		local current = root
+		local stack = {}
+
+		while pos <= len do
+			local ltPos = string.find(xmlStr, "<", pos, true)
+			if not ltPos then break end
+			if ltPos > pos then
+				local raw = string.sub(xmlStr, pos, ltPos - 1)
+				if raw:find("%S") then
+					current.text = (current.text or "") .. unescapeXml(raw)
+				end
+			end
+			if string.sub(xmlStr, ltPos, ltPos + 8) == "<![CDATA[" then
+				local closePos = string.find(xmlStr, "]]>", ltPos + 9, true)
+				current.text = (current.text or "") .. string.sub(xmlStr, ltPos + 9, closePos - 1)
+				pos = closePos + 3
+			elseif string.sub(xmlStr, ltPos, ltPos + 3) == "<!--" then
+				local closePos = string.find(xmlStr, "-->", ltPos + 4, true)
+				pos = closePos and (closePos + 3) or (len + 1)
+			elseif string.sub(xmlStr, ltPos + 1, ltPos + 1) == "/" then
+				local gtPos = string.find(xmlStr, ">", ltPos, true)
+				current = table.remove(stack) or root
+				pos = gtPos + 1
+			else
+				local gtPos = string.find(xmlStr, ">", ltPos, true)
+				local tagContent = string.sub(xmlStr, ltPos + 1, gtPos - 1)
+				local tagName = string.match(tagContent, "^([%w_:%.]+)")
+				local node = { tag = tagName, attrs = {}, children = {} }
+				for attrName, attrVal in string.gmatch(tagContent, '([%w_:%.]+)="([^"]*)"') do
+					node.attrs[attrName] = unescapeXml(attrVal)
+				end
+				table.insert(current.children, node)
+				table.insert(stack, current)
+				current = node
+				pos = gtPos + 1
+			end
+		end
+		return root
+	end
+
+	local function childByTag(node, tagName)
+		if not node then return nil end
+		for _, c in node.children do
+			if c.tag == tagName then return c end
+		end
+		return nil
+	end
+	local function nodeText(node, default)
+		if not node then return default or "" end
+		return node.text or (default or "")
+	end
+	local function childTextDefault(node, tagName, default)
+		local c = childByTag(node, tagName)
+		if c then return c.text or default end
+		return default
+	end
+	local function contentText(node)
+		if not node then return "" end
+		if node.text and node.text ~= "" then return node.text end
+		local urlNode = childByTag(node, "url")
+		if urlNode then return urlNode.text or "" end
+		return ""
+	end
+
+	local function toNum(s, default)
+		if not s or s == "" then return default or 0 end
+		local lower = s:lower()
+		if lower == "nan" then return 0 / 0 end
+		if lower == "inf" or lower == "+inf" or lower == "infinity" then return math.huge end
+		if lower == "-inf" or lower == "-infinity" then return -math.huge end
+		return tonumber(s) or (default or 0)
+	end
+	local function toInt(s, default)
+		if not s or s == "" then return default or 0 end
+		local n = tonumber(s)
+		return n and math.floor(n) or (default or 0)
+	end
+	local function toBool(s)
+		if not s then return false end
+		local l = s:lower()
+		return l == "1" or l == "true" or l == "yes"
+	end
+
+	local function matchRotationId(m)
+		for id, rot in ROTATIONS do
+			local ok = true
+			for i = 1, 9 do
+				if math.abs(m[i] - rot[i]) > 1e-4 then ok = false break end
+			end
+			if ok then return id end
+		end
+		return nil
+	end
+
+	--// builds instance tree from xml
+	local function buildInstanceTree(xmlRoot)
+		local robloxNode
+		for _, c in xmlRoot.children do
+			if c.tag == "roblox" then robloxNode = c break end
+		end
+		assert(robloxNode, "no <roblox> root found")
+
+		local roots, byRef = {}, {}
+		local orderCounter = 0
+
+		local function visit(itemNode, parent)
+			local className = itemNode.attrs.class
+			local referent = itemNode.attrs.referent
+			local inst = {
+				className = className, referent = referent, name = className,
+				parent = parent, children = {}, properties = {}, order = orderCounter,
+			}
+			orderCounter += 1
+			byRef[referent] = inst
+			if parent then table.insert(parent.children, inst) else table.insert(roots, inst) end
+
+			for _, child in itemNode.children do
+				if child.tag == "Properties" then
+					for _, prop in child.children do
+						local pname = prop.attrs.name
+						if pname then
+							inst.properties[pname] = prop
+							if pname == "Name" then inst.name = nodeText(prop, className) end
+						end
+					end
+				end
+			end
+			for _, child in itemNode.children do
+				if child.tag == "Item" then visit(child, inst) end
+			end
+		end
+
+		for _, child in robloxNode.children do
+			if child.tag == "Item" then visit(child, nil) end
+		end
+
+		local sharedTable = {}
+		for _, child in robloxNode.children do
+			if child.tag == "SharedStrings" then
+				for _, entry in child.children do
+					if entry.tag == "SharedString" and entry.attrs.md5 then
+						sharedTable[entry.attrs.md5] = base64Decode(nodeText(entry, ""))
+					end
+				end
+			end
+		end
+
+		return roots, byRef, sharedTable
+	end
+
+	local function postorder(roots)
+		local out = {}
+		local function visit(inst)
+			for _, c in inst.children do visit(c) end
+			table.insert(out, inst)
+		end
+		for _, r in roots do visit(r) end
+		return out
+	end
+
+	-- >> property encoder
+	local function encodeProperty(tag, className, propName, group, idMap, sstrMap, sstrOrder, sharedTable)
+		tag = PROPERTY_TYPE_OVERRIDES[propName] or tag
+		local key = className .. ":" .. propName
+		if FORCE_CONTENT_ID_STRING[key] then tag = "ContentId"
+		elseif FORCE_CONTENT_STRUCT[key] then tag = "Content"
+		elseif tag == "Content" then tag = "ContentId" end
+
+		local nodes = {}
+		for i, inst in ipairs(group) do nodes[i] = inst.properties[propName] end
+
+		if tag == "string" or tag == "ProtectedString" then
+			local parts = {}
+			for i, n in ipairs(nodes) do parts[i] = stringb(nodeText(n, "")) end
+			return 0x01, table.concat(parts)
+		end
+		if tag == "ContentId" then
+			local parts = {}
+			for i, n in ipairs(nodes) do parts[i] = stringb(contentText(n)) end
+			return 0x01, table.concat(parts)
+		end
+		if tag == "SecurityCapabilities" then
+			local values = {}
+			for i, n in ipairs(nodes) do values[i] = toInt(nodeText(n), 0) end
+			return 0x21, interleavedI64(values)
+		end
+		if tag == "NumberSequence" then
+			local out = {}
+			for _, n in ipairs(nodes) do
+				local nums = {}
+				for tok in nodeText(n, ""):gmatch("%S+") do table.insert(nums, toNum(tok, 0)) end
+				local count = math.floor(#nums / 3)
+				table.insert(out, u32b(count))
+				for k = 1, count do
+					local b = (k - 1) * 3
+					table.insert(out, f32b(nums[b+1])); table.insert(out, f32b(nums[b+2])); table.insert(out, f32b(nums[b+3]))
+				end
+			end
+			return 0x15, table.concat(out)
+		end
+		if tag == "ColorSequence" then
+			local out = {}
+			for _, n in ipairs(nodes) do
+				local nums = {}
+				for tok in nodeText(n, ""):gmatch("%S+") do table.insert(nums, toNum(tok, 0)) end
+				local count = math.floor(#nums / 5)
+				table.insert(out, u32b(count))
+				for k = 1, count do
+					local b = (k - 1) * 5
+					table.insert(out, f32b(nums[b+1])); table.insert(out, f32b(nums[b+2]))
+					table.insert(out, f32b(nums[b+3])); table.insert(out, f32b(nums[b+4])); table.insert(out, f32b(0))
+				end
+			end
+			return 0x16, table.concat(out)
+		end
+		if tag == "Content" then
+			local sourceTypes, uris = {}, {}
+			for i, n in ipairs(nodes) do
+				local v = contentText(n)
+				if v == "" then sourceTypes[i] = 0 else sourceTypes[i] = 1; table.insert(uris, v) end
+			end
+			local out = { interleavedI32(sourceTypes), u32b(#uris) }
+			for _, u in ipairs(uris) do table.insert(out, stringb(u)) end
+			table.insert(out, u32b(0)); table.insert(out, u32b(0))
+			return 0x22, table.concat(out)
+		end
+		if tag == "BinaryString" then
+			local parts = {}
+			for i, n in ipairs(nodes) do
+				local raw = base64Decode(nodeText(n, ""))
+				parts[i] = u32b(#raw) .. raw
+			end
+			return 0x01, table.concat(parts)
+		end
+		if tag == "bool" then
+			local out = {}
+			for _, n in ipairs(nodes) do out[#out+1] = toBool(nodeText(n)) and "\1" or "\0" end
+			return 0x02, table.concat(out)
+		end
+		if tag == "int" then
+			local values = {}
+			for i, n in ipairs(nodes) do values[i] = toInt(nodeText(n), 0) end
+			return 0x03, interleavedI32(values)
+		end
+		if tag == "int64" then
+			local values = {}
+			for i, n in ipairs(nodes) do values[i] = toInt(nodeText(n), 0) end
+			return 0x1B, interleavedI64(values)
+		end
+		if tag == "float" then
+			local values = {}
+			for i, n in ipairs(nodes) do values[i] = toNum(nodeText(n), 0) end
+			return 0x04, interleavedF32(values)
+		end
+		if tag == "double" then
+			local parts = {}
+			for i, n in ipairs(nodes) do parts[i] = f64b(toNum(nodeText(n), 0)) end
+			return 0x05, table.concat(parts)
+		end
+		if tag == "token" then
+			local values = {}
+			for i, n in ipairs(nodes) do values[i] = toInt(nodeText(n), 0) end
+			return 0x12, interleavedU32(values)
+		end
+		if tag == "BrickColor" then
+			local values = {}
+			for i, n in ipairs(nodes) do values[i] = toInt(nodeText(n), 0) end
+			return 0x0B, interleavedU32(values)
+		end
+		if tag == "Color3uint8" then
+			local rs, gs, bs = {}, {}, {}
+			for i, n in ipairs(nodes) do
+				local packed = toInt(nodeText(n), 0)
+				rs[i] = bit32.band(bit32.rshift(packed, 16), 0xFF)
+				gs[i] = bit32.band(bit32.rshift(packed, 8), 0xFF)
+				bs[i] = bit32.band(packed, 0xFF)
+			end
+			local out = {}
+			for i = 1, #rs do out[#out+1] = string.char(rs[i]) end
+			for i = 1, #gs do out[#out+1] = string.char(gs[i]) end
+			for i = 1, #bs do out[#out+1] = string.char(bs[i]) end
+			return 0x1A, table.concat(out)
+		end
+		if tag == "Color3" then
+			local rs, gs, bs = {}, {}, {}
+			for i, n in ipairs(nodes) do
+				rs[i] = toNum(childTextDefault(n, "R", "0"), 0)
+				gs[i] = toNum(childTextDefault(n, "G", "0"), 0)
+				bs[i] = toNum(childTextDefault(n, "B", "0"), 0)
+			end
+			return 0x0C, interleavedF32(rs) .. interleavedF32(gs) .. interleavedF32(bs)
+		end
+		if tag == "Vector2" then
+			local xs, ys = {}, {}
+			for i, n in ipairs(nodes) do
+				xs[i] = toNum(childTextDefault(n, "X", "0"), 0); ys[i] = toNum(childTextDefault(n, "Y", "0"), 0)
+			end
+			return 0x0D, interleavedF32(xs) .. interleavedF32(ys)
+		end
+		if tag == "Vector3" then
+			local xs, ys, zs = {}, {}, {}
+			for i, n in ipairs(nodes) do
+				xs[i] = toNum(childTextDefault(n, "X", "0"), 0)
+				ys[i] = toNum(childTextDefault(n, "Y", "0"), 0)
+				zs[i] = toNum(childTextDefault(n, "Z", "0"), 0)
+			end
+			return 0x0E, interleavedF32(xs) .. interleavedF32(ys) .. interleavedF32(zs)
+		end
+		if tag == "Vector2int16" then
+			local out = {}
+			for _, n in ipairs(nodes) do
+				out[#out+1] = i16b(toInt(childTextDefault(n, "X", "0"), 0)) .. i16b(toInt(childTextDefault(n, "Y", "0"), 0))
+			end
+			return 0x0F, table.concat(out)
+		end
+		if tag == "Vector3int16" then
+			local out = {}
+			for _, n in ipairs(nodes) do
+				out[#out+1] = i16b(toInt(childTextDefault(n, "X", "0"), 0)) .. i16b(toInt(childTextDefault(n, "Y", "0"), 0)) .. i16b(toInt(childTextDefault(n, "Z", "0"), 0))
+			end
+			return 0x14, table.concat(out)
+		end
+		if tag == "UDim" then
+			local scales, offsets = {}, {}
+			for i, n in ipairs(nodes) do
+				scales[i] = toNum(childTextDefault(n, "S", childTextDefault(n, "Scale", "0")), 0)
+				offsets[i] = toInt(childTextDefault(n, "O", childTextDefault(n, "Offset", "0")), 0)
+			end
+			return 0x06, interleavedF32(scales) .. interleavedI32(offsets)
+		end
+		if tag == "UDim2" then
+			local xs, ys, xo, yo = {}, {}, {}, {}
+			for i, n in ipairs(nodes) do
+				xs[i] = toNum(childTextDefault(n, "XS", childTextDefault(n, "XScale", "0")), 0)
+				ys[i] = toNum(childTextDefault(n, "YS", childTextDefault(n, "YScale", "0")), 0)
+				xo[i] = toInt(childTextDefault(n, "XO", childTextDefault(n, "XOffset", "0")), 0)
+				yo[i] = toInt(childTextDefault(n, "YO", childTextDefault(n, "YOffset", "0")), 0)
+			end
+			return 0x07, interleavedF32(xs) .. interleavedF32(ys) .. interleavedI32(xo) .. interleavedI32(yo)
+		end
+		if tag == "Ref" or tag == "Object" then
+			local ids = {}
+			for i, n in ipairs(nodes) do
+				local refStr = nodeText(n, "")
+				ids[i] = (refStr == "" or refStr == "null") and -1 or (idMap[refStr] or -1)
+			end
+			return 0x13, encodeReferents(ids)
+		end
+		if tag == "Faces" then
+			local out = {}
+			for _, n in ipairs(nodes) do
+				out[#out+1] = string.char(bit32.band(toInt(nodeText(childByTag(n, "faces"), "0"), 0), 0xFF))
+			end
+			return 0x09, table.concat(out)
+		end
+		if tag == "Axes" then
+			local out = {}
+			for _, n in ipairs(nodes) do
+				out[#out+1] = string.char(bit32.band(toInt(nodeText(childByTag(n, "axes"), "0"), 0), 0xFF))
+			end
+			return 0x0A, table.concat(out)
+		end
+		if tag == "Ray" then
+			local out = {}
+			for _, n in ipairs(nodes) do
+				local o, d = childByTag(n, "origin"), childByTag(n, "direction")
+				out[#out+1] = f32b(toNum(childTextDefault(o, "X", "0"), 0)) .. f32b(toNum(childTextDefault(o, "Y", "0"), 0)) .. f32b(toNum(childTextDefault(o, "Z", "0"), 0))
+					.. f32b(toNum(childTextDefault(d, "X", "0"), 0)) .. f32b(toNum(childTextDefault(d, "Y", "0"), 0)) .. f32b(toNum(childTextDefault(d, "Z", "0"), 0))
+			end
+			return 0x08, table.concat(out)
+		end
+		if tag == "CFrame" or tag == "CoordinateFrame" then
+			local rotBytes, xs, ys, zs = {}, {}, {}, {}
+			for i, n in ipairs(nodes) do
+				local src = n
+				if src and not childByTag(src, "X") then
+					local inner = childByTag(src, "CFrame")
+					if inner then src = inner end
+				end
+				local px = toNum(childTextDefault(src, "X", "0"), 0)
+				local py = toNum(childTextDefault(src, "Y", "0"), 0)
+				local pz = toNum(childTextDefault(src, "Z", "0"), 0)
+				local m = {
+					toNum(childTextDefault(src, "R00", "1"), 1), toNum(childTextDefault(src, "R01", "0"), 0), toNum(childTextDefault(src, "R02", "0"), 0),
+					toNum(childTextDefault(src, "R10", "0"), 0), toNum(childTextDefault(src, "R11", "1"), 1), toNum(childTextDefault(src, "R12", "0"), 0),
+					toNum(childTextDefault(src, "R20", "0"), 0), toNum(childTextDefault(src, "R21", "0"), 0), toNum(childTextDefault(src, "R22", "1"), 1),
+				}
+				local rid = matchRotationId(m)
+				if rid then
+					rotBytes[#rotBytes+1] = string.char(rid)
+				else
+					rotBytes[#rotBytes+1] = string.char(0) .. f32b(m[1])..f32b(m[2])..f32b(m[3])..f32b(m[4])..f32b(m[5])..f32b(m[6])..f32b(m[7])..f32b(m[8])..f32b(m[9])
+				end
+				xs[i] = px; ys[i] = py; zs[i] = pz
+			end
+			return 0x10, table.concat(rotBytes) .. interleavedF32(xs) .. interleavedF32(ys) .. interleavedF32(zs)
+		end
+		if tag == "NumberRange" then
+			local out = {}
+			for _, n in ipairs(nodes) do
+				local a, b = nodeText(n, "0 0"):match("(%S+)%s+(%S+)")
+				out[#out+1] = f32b(toNum(a, 0)) .. f32b(toNum(b, 0))
+			end
+			return 0x17, table.concat(out)
+		end
+		if tag == "Rect2D" or tag == "Rect" then
+			local minx, miny, maxx, maxy = {}, {}, {}, {}
+			for i, n in ipairs(nodes) do
+				local mn, mx = childByTag(n, "min"), childByTag(n, "max")
+				minx[i] = toNum(childTextDefault(mn, "X", "0"), 0); miny[i] = toNum(childTextDefault(mn, "Y", "0"), 0)
+				maxx[i] = toNum(childTextDefault(mx, "X", "0"), 0); maxy[i] = toNum(childTextDefault(mx, "Y", "0"), 0)
+			end
+			return 0x18, interleavedF32(minx) .. interleavedF32(miny) .. interleavedF32(maxx) .. interleavedF32(maxy)
+		end
+		if tag == "SharedString" then
+			local ids = {}
+			for i, n in ipairs(nodes) do
+				local k = nodeText(n, "")
+				local raw = (k ~= "" and sharedTable[k]) or ""
+				if sstrMap[raw] == nil then
+					sstrMap[raw] = #sstrOrder
+					table.insert(sstrOrder, raw)
+				end
+				ids[i] = sstrMap[raw]
+			end
+			return 0x1C, interleavedU32(ids)
+		end
+		if tag == "UniqueId" then
+			local out = {}
+			for _, n in ipairs(nodes) do
+				local hex = (nodeText(n, "") or ""):gsub("-", "")
+				local bytes = {}
+				for k = 1, 16 do
+					bytes[k] = string.char(tonumber(hex:sub((k-1)*2+1, (k-1)*2+2), 16) or 0)
+				end
+				out[#out+1] = table.concat(bytes)
+			end
+			return 0x1F, table.concat(out)
+		end
+		if tag == "Font" then
+			local FONT_STYLES = { Normal = 0, Italic = 1 }
+			local out = {}
+			for _, n in ipairs(nodes) do
+				local family = contentText(childByTag(n, "Family"))
+				local weight = toInt(nodeText(childByTag(n, "Weight"), "400"), 400)
+				local style = FONT_STYLES[nodeText(childByTag(n, "Style"), "Normal")] or 0
+				out[#out+1] = stringb(family) .. u16b(weight) .. string.char(style) .. stringb("")
+			end
+			return 0x20, table.concat(out)
+		end
+		if tag == "PhysicalProperties" then
+			local out = {}
+			for _, n in ipairs(nodes) do
+				local customNode = childByTag(n, "CustomPhysics")
+				local custom = customNode and toBool(nodeText(customNode, "false"))
+				if not custom then
+					out[#out+1] = "\0"
+				else
+					out[#out+1] = "\1"
+						.. f32b(toNum(childTextDefault(n, "Density", "0.7"), 0.7))
+						.. f32b(toNum(childTextDefault(n, "Friction", "0.3"), 0.3))
+						.. f32b(toNum(childTextDefault(n, "Elasticity", "0.5"), 0.5))
+						.. f32b(toNum(childTextDefault(n, "FrictionWeight", "1"), 1))
+						.. f32b(toNum(childTextDefault(n, "ElasticityWeight", "1"), 1))
+				end
+			end
+			return 0x19, table.concat(out)
+		end
+		return nil
+	end
+
+	local function fakeDigest16(index)
+		local b = buffer.create(16)
+		buffer.writeu32(b, 0, index)
+		return buffer.tostring(b)
+	end
+
+	BinaryConvert = function(xmlText, compression)
+		compression = compression or "lz4"
+		local xmlRoot = parseXml(xmlText)
+		local roots, byRef, sharedTable = buildInstanceTree(xmlRoot)
+		local ordered = postorder(roots)
+
+		local idMap = {}
+		for i, inst in ipairs(ordered) do idMap[inst.referent] = i - 1 end
+
+		local grouped, classOrder = {}, {}
+		for _, inst in ipairs(ordered) do
+			if not grouped[inst.className] then
+				grouped[inst.className] = {}
+				table.insert(classOrder, inst.className)
+			end
+			table.insert(grouped[inst.className], inst)
+		end
+		table.sort(classOrder)
+
+		local typeIds = {}
+		for i, cls in ipairs(classOrder) do typeIds[cls] = i - 1 end
+
+		local sstrMap, sstrOrder = {}, {}
+		for _, inst in ipairs(ordered) do
+			for _, prop in inst.properties do
+				if prop.tag == "SharedString" then
+					local k = nodeText(prop, "")
+					local raw = (k ~= "" and sharedTable[k]) or ""
+					if sstrMap[raw] == nil then
+						sstrMap[raw] = #sstrOrder
+						table.insert(sstrOrder, raw)
+					end
+				end
+			end
+		end
+
+		local out = { MAGIC, u16b(0) .. u32b(#classOrder) .. u32b(#ordered), string.rep("\0", 8) }
+
+		if #sstrOrder > 0 then
+			local payload = { u32b(0), u32b(#sstrOrder) }
+			for idx, raw in ipairs(sstrOrder) do
+				payload[#payload+1] = fakeDigest16(idx - 1)
+				payload[#payload+1] = u32b(#raw) .. raw
+			end
+			out[#out+1] = makeChunk("SSTR", table.concat(payload), compression)
+		end
+
+		for _, cls in ipairs(classOrder) do
+			local group = grouped[cls]
+			local isService = ROBLOX_SERVICE_CLASSES[cls] == true
+			local payload = { u32b(typeIds[cls]), stringb(cls), isService and "\1" or "\0", u32b(#group) }
+			local refIds = {}
+			for i, inst in ipairs(group) do refIds[i] = idMap[inst.referent] end
+			table.insert(payload, encodeReferents(refIds))
+			if isService then
+				local flags = {}
+				for i, inst in ipairs(group) do flags[i] = (inst.parent == nil) and "\1" or "\0" end
+				table.insert(payload, table.concat(flags))
+			end
+			out[#out+1] = makeChunk("INST", table.concat(payload), compression)
+		end
+
+		for _, cls in ipairs(classOrder) do
+			local group = grouped[cls]
+			local names, seen = {}, {}
+			for _, inst in ipairs(group) do
+				for pname in inst.properties do
+					if pname ~= "Name" and not seen[pname] then
+						seen[pname] = true
+						table.insert(names, pname)
+					end
+				end
+			end
+			table.sort(names)
+
+			for _, pname in ipairs(names) do
+				local sampleTag
+				for _, inst in ipairs(group) do
+					local p = inst.properties[pname]
+					if p then sampleTag = p.tag break end
+				end
+				if sampleTag then
+					local typeId, payload = encodeProperty(sampleTag, cls, pname, group, idMap, sstrMap, sstrOrder, sharedTable)
+					if typeId then
+						out[#out+1] = makeChunk("PROP", u32b(typeIds[cls]) .. stringb(pname) .. string.char(typeId) .. payload, compression)
+					else
+						warn("Binary: unsupported property " .. cls .. "." .. pname .. " (<" .. sampleTag .. ">); skipped")
+					end
+				end
+			end
+
+			local nameParts = {}
+			for _, inst in ipairs(group) do table.insert(nameParts, stringb(inst.name)) end
+			out[#out+1] = makeChunk("PROP", u32b(typeIds[cls]) .. stringb("Name") .. "\1" .. table.concat(nameParts), compression)
+		end
+
+		local childRefs, parentRefs = {}, {}
+		for i, inst in ipairs(ordered) do
+			childRefs[i] = idMap[inst.referent]
+			parentRefs[i] = inst.parent and idMap[inst.parent.referent] or -1
+		end
+		out[#out+1] = makeChunk("PRNT", "\0" .. u32b(#ordered) .. encodeReferents(childRefs) .. encodeReferents(parentRefs), compression)
+		out[#out+1] = makeChunk("END\0", "</roblox>", "none")
+
+		return table.concat(out)
+	end
+end
+
 local ClassList, FetchAPI
 
 do
@@ -3052,7 +3854,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		-- * New:
 		__DEBUG_MODE = false,
 
-		-- Binary = false, -- true in syn newer versions (false in our case because no binary support yet), Description: Saves everything in Binary Mode (rbxl/rbxm).
+		Binary = true, -- Description: Saves everything in Binary Mode (rbxl/rbxm).
 		Callback = false,
 		--Clipboard/CopyToClipboard = false, -- Description: If set to true, the serialized data will be set to the clipboard, which can be later pasted into studio easily. Useful for saving models. (Binary Only)
 		-- DisableCompression = false, --Description: Disables compression in the binary output
@@ -3482,7 +4284,12 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			end
 		end
 
-		local filetype = IsModel and ".rbxmx" or ".rbxlx"
+		local filetype
+		if OPTIONS.Binary then
+			filetype = IsModel and ".rbxm" or ".rbxl"
+		else
+			filetype = IsModel and ".rbxmx" or ".rbxlx"
+		end
 
 		if FilePath then
 			local hasExtension = string.match(FilePath, "%.[^/\\]+$") ~= nil
@@ -4680,57 +5487,43 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			local function buildFinalString(chunks)
 				local parts = table.create(#chunks + 1)
 				parts[1] = header
-
 				table.move(chunks, 1, #chunks, 2, parts)
-
 				return table.concat(parts)
 			end
-
-			local Callback = OPTIONS.Callback
-			if Callback then
-				Callback(buildFinalString(chunks), chunks)
-			elseif OPTIONS.AlternativeWritefile and appendfile then
-				local SEGMENT_SIZE = 4145728 -- Celery has an arbitrary savefile/appendfile size limit of ~4MB for reasons unknown. This is a workaround to save the file in segments.
-				local totallen = 0
-				for _, chunk in chunks do
-					totallen += math.ceil(#chunk / SEGMENT_SIZE)
-				end
-
-				local currentlen = 0
-
-				for _, chunk in chunks do
-					local chunk_len = #chunk
-					local offset = 1
-
-					while offset <= chunk_len do
-						local savestr = string.sub(chunk, offset, offset + SEGMENT_SIZE - 1)
-
-						run_with_loading(
-							"Writing to File " .. math.round(currentlen / totallen * 100) .. "% (Depends on Exec)",
-							nil,
-							true,
-							appendfile,
-							placename,
-							savestr
-						)
-
-						currentlen += 1
-						offset += SEGMENT_SIZE
-
-						if offset <= chunk_len then
-							task.wait()
-						end
-					end
+			
+			local finalOutput
+			if OPTIONS.Binary then
+				local xmlText = buildFinalString(chunks)
+				local ok, result = pcall(BinaryConvert, xmlText, "lz4")
+				if ok then
+					finalOutput = result
+				else
+					warn("Binary conversion failed, saving as XML instead: " .. tostring(result))
+					finalOutput = xmlText
+					placename = string.gsub(placename, "%.rbx[lm]$", IsModel and ".rbxmx" or ".rbxlx")
 				end
 			else
-				run_with_loading(
-					"Writing " .. get_size_format() .. " to File (Depends on Exec)",
-					nil,
-					true,
-					writefile,
-					placename,
-					buildFinalString(chunks)
-				)
+				finalOutput = buildFinalString(chunks)
+			end
+			
+			local Callback = OPTIONS.Callback
+			if Callback then
+				Callback(finalOutput, chunks)
+			elseif OPTIONS.AlternativeWritefile and appendfile then
+				local SEGMENT_SIZE = 4145728
+				local total_len = #finalOutput
+				local offset = 1
+				while offset <= total_len do
+					local segment = string.sub(finalOutput, offset, offset + SEGMENT_SIZE - 1)
+					run_with_loading(
+						"Writing to File " .. math.round((offset - 1) / total_len * 100) .. "% (Depends on Exec)",
+						nil, true, appendfile, placename, segment
+					)
+					offset += SEGMENT_SIZE
+					if offset <= total_len then task.wait() end
+				end
+			else
+				run_with_loading("Writing " .. get_size_format() .. " to File (Depends on Exec)", nil, true, writefile, placename, finalOutput)
 			end
 		end
 	end
