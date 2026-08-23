@@ -1,6 +1,6 @@
 --[[
-  written by: @NumanLUAU on github
-  discord: @corescripts
+	written by: @NumanLUAU on github
+	discord: @corescripts
 ]]
 
 --!strict
@@ -42,6 +42,9 @@ local T_UNIQUEID = 0x1F
 local T_FONT = 0x20
 local T_SECURITY_CAPABILITIES = 0x21
 local T_CONTENT = 0x22
+
+local U32 = 4294967296
+local U32_HALF = 2147483648
 
 local ROBLOX_SERVICE_CLASSES = {
 	Workspace = true,
@@ -137,6 +140,7 @@ local ROTATION_TO_ID = {}
 
 for id, matrix in pairs(ROTATIONS) do
 	local key = ""
+
 	for i = 1, 9 do
 		key ..= string.format("%.6f,", matrix[i])
 	end
@@ -179,6 +183,11 @@ local CONTENT_STRUCT_PROPERTY_NAMES = {
 }
 
 -- >> types
+type U64 = {
+	high: number,
+	low: number,
+}
+
 type XmlElement = {
 	tag: string,
 	attributes: {[string]: string},
@@ -210,18 +219,18 @@ type Writer = {
 }
 
 -- >> functions
---// creates a growable binary writer backed by Roblox's buffer type.
+--// creates a growable binary writer backed by Roblox buffer.
 local function createWriter(size: number?): Writer
-	local capacity = size or 256
+	local capacity = math.max(size or 256, 1)
 
 	return {
-		buffer = buffer.create(math.max(capacity, 1)),
+		buffer = buffer.create(capacity),
 		size = capacity,
 		position = 0,
 	}
 end
 
---// grows the writer when more room is required.
+--// grows the backing buffer when the requested write no longer fits.
 local function ensure(writer: Writer, amount: number)
 	local required = writer.position + amount
 
@@ -236,7 +245,10 @@ local function ensure(writer: Writer, amount: number)
 	end
 
 	local nextBuffer = buffer.create(size)
-	buffer.copy(nextBuffer, 0, writer.buffer, 0, writer.position)
+
+	if writer.position > 0 then
+		buffer.copy(nextBuffer, 0, writer.buffer, 0, writer.position)
+	end
 
 	writer.buffer = nextBuffer
 	writer.size = size
@@ -255,129 +267,245 @@ local function writeBytes(writer: Writer, value: string)
 	writer.position += length
 end
 
---// writes one byte.
+--// writes one unsigned byte.
 local function writeU8(writer: Writer, value: number)
 	ensure(writer, 1)
-	buffer.writeu8(writer.buffer, writer.position, value % 256)
+	buffer.writeu8(writer.buffer, writer.position, bit32.band(value, 0xff))
 	writer.position += 1
 end
 
---// writes an unsigned 16-bit little-endian integer.
+--// writes a little-endian unsigned 16-bit integer.
 local function writeU16(writer: Writer, value: number)
 	ensure(writer, 2)
-	buffer.writeu16(writer.buffer, writer.position, value % 65536)
+	buffer.writeu16(writer.buffer, writer.position, bit32.band(value, 0xffff))
 	writer.position += 2
 end
 
---// writes an unsigned 32-bit little-endian integer.
-local function writeU32(writer: Writer, value: number)
-	ensure(writer, 4)
-	buffer.writeu32(writer.buffer, writer.position, value % 4294967296)
-	writer.position += 4
-end
-
---// writes a signed 16-bit little-endian integer.
+--// writes a little-endian signed 16-bit integer.
 local function writeI16(writer: Writer, value: number)
 	ensure(writer, 2)
-	buffer.writei16(writer.buffer, writer.position, math.clamp(math.floor(value), -32768, 32767))
+	buffer.writei16(
+		writer.buffer,
+		writer.position,
+		math.clamp(math.floor(value), -32768, 32767)
+	)
 	writer.position += 2
 end
 
---// writes a signed 32-bit little-endian integer.
-local function writeI32(writer: Writer, value: number)
+--// writes a little-endian unsigned 32-bit integer.
+local function writeU32(writer: Writer, value: number)
 	ensure(writer, 4)
-	buffer.writei32(writer.buffer, writer.position, value)
+	buffer.writeu32(
+		writer.buffer,
+		writer.position,
+		bit32.band(value, 0xffffffff)
+	)
 	writer.position += 4
 end
 
---// writes a 32-bit floating point value.
+--// writes a little-endian signed 32-bit integer.
+local function writeI32(writer: Writer, value: number)
+	ensure(writer, 4)
+	buffer.writei32(
+		writer.buffer,
+		writer.position,
+		value
+	)
+	writer.position += 4
+end
+
+--// writes a little-endian float.
 local function writeF32(writer: Writer, value: number)
 	ensure(writer, 4)
 	buffer.writef32(writer.buffer, writer.position, value)
 	writer.position += 4
 end
 
---// writes a 64-bit floating point value.
+--// writes a little-endian double.
 local function writeF64(writer: Writer, value: number)
 	ensure(writer, 8)
 	buffer.writef64(writer.buffer, writer.position, value)
 	writer.position += 8
 end
 
---// writes a raw big-endian u32, matching Python's struct.pack(">I").
+--// writes a big-endian u32.
 local function writeBEU32(writer: Writer, value: number)
-	value %= 4294967296
+	value = bit32.band(value, 0xffffffff)
 
-	writeU8(writer, math.floor(value / 16777216) % 256)
-	writeU8(writer, math.floor(value / 65536) % 256)
-	writeU8(writer, math.floor(value / 256) % 256)
-	writeU8(writer, value % 256)
+	writeU8(writer, bit32.band(bit32.rshift(value, 24), 0xff))
+	writeU8(writer, bit32.band(bit32.rshift(value, 16), 0xff))
+	writeU8(writer, bit32.band(bit32.rshift(value, 8), 0xff))
+	writeU8(writer, bit32.band(value, 0xff))
 end
 
---// writes a raw big-endian u64 from a non-negative integer.
-local function writeBEU64(writer: Writer, value: number)
-	local high = math.floor(value / 4294967296)
-	local low = value % 4294967296
-
-	writeBEU32(writer, high)
-	writeBEU32(writer, low)
-end
-
---// returns the used bytes from a writer.
+--// converts the used portion of a writer into a binary string.
 local function writerString(writer: Writer): string
 	return buffer.readstring(writer.buffer, 0, writer.position)
 end
 
---// writes a Roblox length-prefixed UTF-8 string.
+--// writes a Roblox length-prefixed string.
 local function writeString(writer: Writer, value: string)
 	writeU32(writer, #value)
 	writeBytes(writer, value)
 end
 
---// writes a length-prefixed binary string.
+--// writes a Roblox length-prefixed binary string.
 local function writeBString(writer: Writer, value: string)
 	writeU32(writer, #value)
 	writeBytes(writer, value)
 end
 
---// transforms a signed i32 using Roblox's interleaving transform.
-local function transformI32(value: number): number
-	value %= 4294967296
-
-	if value >= 2147483648 then
-		value -= 4294967296
-	end
-
-	local result = value * 2
-
-	if value < 0 then
-		result += 1
-	end
-
-	return result % 4294967296
+--// creates an unsigned 64-bit zero value.
+local function u64Zero(): U64
+	return {
+		high = 0,
+		low = 0,
+	}
 end
 
---// transforms a signed i64 using Roblox's interleaving transform.
-local function transformI64(value: number): number
-	local limit = 18446744073709551616
-
-	value %= limit
-
-	if value >= 9223372036854775808 then
-		value -= limit
-	end
-
-	local result = value * 2
-
-	if value < 0 then
-		result += 1
-	end
-
-	return result % limit
+--// returns a 64-bit value with both halves masked to unsigned 32-bit ranges.
+local function normalizeU64(value: U64): U64
+	return {
+		high = bit32.band(value.high, 0xffffffff),
+		low = bit32.band(value.low, 0xffffffff),
+	}
 end
 
---// returns a float's exact IEEE-754 bit representation.
-local FLOAT_SCRATCH = buffer.create(8)
+--// tests the sign bit of a 64-bit two's complement value.
+local function u64Negative(value: U64): boolean
+	return value.high >= U32_HALF
+end
+
+--// bitwise-nots a 64-bit value.
+local function u64Not(value: U64): U64
+	return {
+		high = bit32.bxor(value.high, 0xffffffff),
+		low = bit32.bxor(value.low, 0xffffffff),
+	}
+end
+
+--// adds one to a 64-bit value.
+local function u64AddOne(value: U64): U64
+	local low = value.low + 1
+
+	if low >= U32 then
+		return {
+			high = bit32.band(value.high + 1, 0xffffffff),
+			low = low - U32,
+		}
+	end
+
+	return {
+		high = value.high,
+		low = low,
+	}
+end
+
+--// shifts an unsigned 64-bit value left by one.
+local function u64ShiftLeft1(value: U64): U64
+	return {
+		high = bit32.band(
+			bit32.lshift(value.high, 1) + bit32.rshift(value.low, 31),
+			0xffffffff
+		),
+		low = bit32.lshift(value.low, 1),
+	}
+end
+
+--// performs the Python transform_i64 operation without converting through double precision.
+local function transformI64(value: U64): U64
+	local shifted = u64ShiftLeft1(value)
+
+	if u64Negative(value) then
+		return u64Not(shifted)
+	end
+
+	return normalizeU64(shifted)
+end
+
+--// parses an unsigned decimal string into an exact 64-bit pair.
+local function parseUnsignedDecimal(value: string): U64
+	value = string.gsub(value, "^%s+", "")
+	value = string.gsub(value, "%s+$", "")
+
+	local result = u64Zero()
+
+	if value == "" then
+		return result
+	end
+
+	for i = 1, #value do
+		local digit = string.byte(value, i) - 48
+
+		if digit < 0 or digit > 9 then
+			break
+		end
+
+		local low = result.low * 10 + digit
+		local carry = math.floor(low / U32)
+
+		result.low = low - carry * U32
+		result.high = (result.high * 10 + carry) % U32
+	end
+
+	return result
+end
+
+--// parses a signed decimal integer into an exact two's complement 64-bit pair.
+local function parseInt64(value: string): U64
+	value = string.gsub(value, "^%s+", "")
+	value = string.gsub(value, "%s+$", "")
+
+	if value == "" then
+		return u64Zero()
+	end
+
+	local negative = string.sub(value, 1, 1) == "-"
+
+	if negative then
+		value = string.sub(value, 2)
+	elseif string.sub(value, 1, 1) == "+" then
+		value = string.sub(value, 2)
+	end
+
+	local result = parseUnsignedDecimal(value)
+
+	if negative then
+		result = u64Not(result)
+		result = u64AddOne(result)
+	end
+
+	return result
+end
+
+--// parses a hexadecimal string into an exact 64-bit pair.
+local function parseHex64(value: string): U64
+	value = string.lower(string.gsub(value, "^%s+", ""))
+	value = string.gsub(value, "%s+$", "")
+	value = string.gsub(value, "^0x", "")
+
+	value = string.rep("0", math.max(0, 16 - #value)) .. value
+
+	local highText = string.sub(value, math.max(1, #value - 15), math.max(8, #value - 8))
+	local lowText = string.sub(value, math.max(9, #value - 7))
+
+	local high = tonumber(highText, 16) or 0
+	local low = tonumber(lowText, 16) or 0
+
+	return {
+		high = high,
+		low = low,
+	}
+end
+
+--// writes a raw big-endian 64-bit value.
+local function writeBEU64(writer: Writer, value: U64)
+	writeBEU32(writer, value.high)
+	writeBEU32(writer, value.low)
+end
+
+--// returns the IEEE-754 single precision bit representation of a number.
+local FLOAT_SCRATCH = buffer.create(4)
 
 local function floatBits(value: number): number
 	buffer.writef32(FLOAT_SCRATCH, 0, value)
@@ -388,11 +516,35 @@ end
 local function rotatedF32Bits(value: number): number
 	local bits = floatBits(value)
 
-	return (bit32.lshift(bits, 1) + bit32.rshift(bits, 31)) % 4294967296
+	return bit32.bor(
+		bit32.lshift(bits, 1),
+		bit32.rshift(bits, 31)
+	)
 end
 
---// writes an interleaved i32 column.
-local function writeInterleavedI32(writer: Writer, values: {number}, transformed: boolean?)
+--// transforms a signed 32-bit integer exactly like Python's transform_i32.
+local function transformI32(value: number): number
+	local unsigned = bit32.band(value, 0xffffffff)
+
+	if unsigned >= U32_HALF then
+		unsigned -= U32
+	end
+
+	return bit32.band(
+		bit32.bxor(
+			bit32.lshift(unsigned, 1),
+			bit32.arshift(unsigned, 31)
+		),
+		0xffffffff
+	)
+end
+
+--// writes a column-interleaved 32-bit integer sequence.
+local function writeInterleavedI32(
+	writer: Writer,
+	values: {number},
+	transformed: boolean?
+)
 	local count = #values
 
 	if count == 0 then
@@ -407,12 +559,18 @@ local function writeInterleavedI32(writer: Writer, values: {number}, transformed
 	}
 
 	for i = 1, count do
-		local value = transformed == false and values[i] % 4294967296 or transformI32(values[i])
+		local value
 
-		columns[1][i] = math.floor(value / 16777216) % 256
-		columns[2][i] = math.floor(value / 65536) % 256
-		columns[3][i] = math.floor(value / 256) % 256
-		columns[4][i] = value % 256
+		if transformed == false then
+			value = bit32.band(values[i], 0xffffffff)
+		else
+			value = transformI32(values[i])
+		end
+
+		columns[1][i] = bit32.band(bit32.rshift(value, 24), 0xff)
+		columns[2][i] = bit32.band(bit32.rshift(value, 16), 0xff)
+		columns[3][i] = bit32.band(bit32.rshift(value, 8), 0xff)
+		columns[4][i] = bit32.band(value, 0xff)
 	end
 
 	for column = 1, 4 do
@@ -422,14 +580,21 @@ local function writeInterleavedI32(writer: Writer, values: {number}, transformed
 	end
 end
 
---// writes an interleaved u32 column.
+--// writes a column-interleaved unsigned 32-bit sequence.
 local function writeInterleavedU32(writer: Writer, values: {number})
 	writeInterleavedI32(writer, values, false)
 end
 
---// writes an interleaved float column.
+--// writes a column-interleaved float sequence.
 local function writeInterleavedF32(writer: Writer, values: {number})
+	local count = #values
+
+	if count == 0 then
+		return
+	end
+
 	local columns = {
+		{},
 		{},
 		{},
 		{},
@@ -438,21 +603,27 @@ local function writeInterleavedF32(writer: Writer, values: {number})
 	for i, value in ipairs(values) do
 		local bits = rotatedF32Bits(value)
 
-		columns[1][i] = math.floor(bits / 16777216) % 256
-		columns[2][i] = math.floor(bits / 65536) % 256
-		columns[3][i] = math.floor(bits / 256) % 256
-		columns[4][i] = bits % 256
+		columns[1][i] = bit32.band(bit32.rshift(bits, 24), 0xff)
+		columns[2][i] = bit32.band(bit32.rshift(bits, 16), 0xff)
+		columns[3][i] = bit32.band(bit32.rshift(bits, 8), 0xff)
+		columns[4][i] = bit32.band(bits, 0xff)
 	end
 
 	for column = 1, 4 do
-		for i = 1, #values do
+		for i = 1, count do
 			writeU8(writer, columns[column][i])
 		end
 	end
 end
 
---// writes an interleaved i64 column.
-local function writeInterleavedI64(writer: Writer, values: {number})
+--// writes a column-interleaved exact 64-bit sequence.
+local function writeInterleavedI64(writer: Writer, values: {U64})
+	local count = #values
+
+	if count == 0 then
+		return
+	end
+
 	local columns = {
 		{},
 		{},
@@ -467,33 +638,24 @@ local function writeInterleavedI64(writer: Writer, values: {number})
 	for i, original in ipairs(values) do
 		local value = transformI64(original)
 
-		local high = math.floor(value / 4294967296)
-		local low = value % 4294967296
-
-		local bytes = {
-			math.floor(high / 16777216) % 256,
-			math.floor(high / 65536) % 256,
-			math.floor(high / 256) % 256,
-			high % 256,
-			math.floor(low / 16777216) % 256,
-			math.floor(low / 65536) % 256,
-			math.floor(low / 256) % 256,
-			low % 256,
-		}
-
-		for column = 1, 8 do
-			columns[column][i] = bytes[column]
-		end
+		columns[1][i] = bit32.band(bit32.rshift(value.high, 24), 0xff)
+		columns[2][i] = bit32.band(bit32.rshift(value.high, 16), 0xff)
+		columns[3][i] = bit32.band(bit32.rshift(value.high, 8), 0xff)
+		columns[4][i] = bit32.band(value.high, 0xff)
+		columns[5][i] = bit32.band(bit32.rshift(value.low, 24), 0xff)
+		columns[6][i] = bit32.band(bit32.rshift(value.low, 16), 0xff)
+		columns[7][i] = bit32.band(bit32.rshift(value.low, 8), 0xff)
+		columns[8][i] = bit32.band(value.low, 0xff)
 	end
 
 	for column = 1, 8 do
-		for i = 1, #values do
+		for i = 1, count do
 			writeU8(writer, columns[column][i])
 		end
 	end
 end
 
---// writes referent deltas as a transformed interleaved i32 column.
+--// writes delta-transformed referents.
 local function writeReferents(writer: Writer, values: {number})
 	local deltas = table.create(#values)
 	local last = 0
@@ -506,12 +668,18 @@ local function writeReferents(writer: Writer, values: {number})
 	writeInterleavedI32(writer, deltas)
 end
 
---// removes XML namespace information from a tag.
+--// strips an XML namespace from a tag name.
 local function localName(tag: string): string
-	local index = string.find(tag, ":", 1, true)
+	local namespace = string.find(tag, "}", 1, true)
 
-	if index then
-		return string.sub(tag, index + 1)
+	if namespace then
+		return string.sub(tag, namespace + 1)
+	end
+
+	local colon = string.find(tag, ":", 1, true)
+
+	if colon then
+		return string.sub(tag, colon + 1)
 	end
 
 	return tag
@@ -519,79 +687,36 @@ end
 
 --// decodes XML character entities.
 local function decodeEntities(value: string): string
-	value = value:gsub("&lt;", "<")
-	value = value:gsub("&gt;", ">")
-	value = value:gsub("&quot;", "\"")
-	value = value:gsub("&apos;", "'")
-	value = value:gsub("&amp;", "&")
-
-	value = value:gsub("&#x([%da-fA-F]+);", function(hex)
+	value = string.gsub(value, "&lt;", "<")
+	value = string.gsub(value, "&gt;", ">")
+	value = string.gsub(value, "&quot;", "\"")
+	value = string.gsub(value, "&apos;", "'")
+	value = string.gsub(value, "&#x([%da-fA-F]+);", function(hex)
 		local codepoint = tonumber(hex, 16)
 
 		if not codepoint then
 			return ""
 		end
 
-		if codepoint <= 0x7f then
-			return string.char(codepoint)
-		elseif codepoint <= 0x7ff then
-			return string.char(
-				0xc0 + math.floor(codepoint / 0x40),
-				0x80 + codepoint % 0x40
-			)
-		elseif codepoint <= 0xffff then
-			return string.char(
-				0xe0 + math.floor(codepoint / 0x1000),
-				0x80 + math.floor(codepoint / 0x40) % 0x40,
-				0x80 + codepoint % 0x40
-			)
-		end
-
-		return string.char(
-			0xf0 + math.floor(codepoint / 0x40000),
-			0x80 + math.floor(codepoint / 0x1000) % 0x40,
-			0x80 + math.floor(codepoint / 0x40) % 0x40,
-			0x80 + codepoint % 0x40
-		)
+		return utf8.char(codepoint)
 	end)
-
-	value = value:gsub("&#(%d+);", function(decimal)
+	value = string.gsub(value, "&#(%d+);", function(decimal)
 		local codepoint = tonumber(decimal)
 
 		if not codepoint then
 			return ""
 		end
 
-		if codepoint <= 0x7f then
-			return string.char(codepoint)
-		elseif codepoint <= 0x7ff then
-			return string.char(
-				0xc0 + math.floor(codepoint / 0x40),
-				0x80 + codepoint % 0x40
-			)
-		elseif codepoint <= 0xffff then
-			return string.char(
-				0xe0 + math.floor(codepoint / 0x1000),
-				0x80 + math.floor(codepoint / 0x40) % 0x40,
-				0x80 + codepoint % 0x40
-			)
-		end
-
-		return string.char(
-			0xf0 + math.floor(codepoint / 0x40000),
-			0x80 + math.floor(codepoint / 0x1000) % 0x40,
-			0x80 + codepoint % 0x40
-		)
+		return utf8.char(codepoint)
 	end)
+	value = string.gsub(value, "&amp;", "&")
 
 	return value
 end
 
---// skips whitespace starting at an XML parser position.
+--// skips XML whitespace.
 local function skipWhitespace(data: string, position: number): number
-	local length = #data
-
-	while position <= length do
+	while position <= #data do
 		local byte = string.byte(data, position)
 
 		if byte ~= 32 and byte ~= 9 and byte ~= 10 and byte ~= 13 then
@@ -609,9 +734,9 @@ local function readName(data: string, position: number): (string, number)
 	local start = position
 
 	while position <= #data do
-		local character = string.sub(data, position, position)
+		local value = string.sub(data, position, position)
 
-		if not character:match("[%w_:%.%-]") then
+		if not value:match("[%w_:%.%-]") then
 			break
 		end
 
@@ -621,7 +746,7 @@ local function readName(data: string, position: number): (string, number)
 	return string.sub(data, start, position - 1), position
 end
 
---// reads an XML quoted attribute.
+--// reads an XML quoted attribute value.
 local function readAttributeValue(data: string, position: number): (string, number)
 	position = skipWhitespace(data, position)
 
@@ -642,28 +767,27 @@ local function readAttributeValue(data: string, position: number): (string, numb
 	return decodeEntities(string.sub(data, position, finish - 1)), finish + 1
 end
 
---// parses the XML string into a lightweight ElementTree-compatible representation.
+--// parses an XML document into a small ElementTree-style structure.
 local function parseXml(data: string): XmlElement
 	local position = 1
-	local length = #data
 	local root: XmlElement? = nil
 	local stack: {XmlElement} = {}
 
-	while position <= length do
+	while position <= #data do
 		local open = string.find(data, "<", position, true)
 
 		if not open then
-			local text = decodeEntities(string.sub(data, position))
-
 			if #stack > 0 then
-				stack[#stack].text ..= text
+				stack[#stack].text ..= decodeEntities(string.sub(data, position))
 			end
 
 			break
 		end
 
 		if open > position and #stack > 0 then
-			stack[#stack].text ..= decodeEntities(string.sub(data, position, open - 1))
+			stack[#stack].text ..= decodeEntities(
+				string.sub(data, position, open - 1)
+			)
 		end
 
 		if string.sub(data, open, open + 3) == "<!--" then
@@ -685,7 +809,11 @@ local function parseXml(data: string): XmlElement
 			end
 
 			if #stack > 0 then
-				stack[#stack].text ..= string.sub(data, open + 9, finish - 1)
+				stack[#stack].text ..= string.sub(
+					data,
+					open + 9,
+					finish - 1
+				)
 			end
 
 			position = finish + 3
@@ -714,15 +842,14 @@ local function parseXml(data: string): XmlElement
 			continue
 		end
 
-		local close = string.sub(data, open + 1, open + 1) == "/"
+		local closing = string.sub(data, open + 1, open + 1) == "/"
 
-		if close then
-			local nameStart = open + 2
-			local name, afterName = readName(data, nameStart)
+		if closing then
+			local name, afterName = readName(data, open + 2)
 			local finish = string.find(data, ">", afterName, true)
 
 			if not finish then
-				error("unterminated closing XML tag")
+				error("unterminated XML closing tag")
 			end
 
 			local current = stack[#stack]
@@ -736,21 +863,19 @@ local function parseXml(data: string): XmlElement
 			continue
 		end
 
-		local name, afterName = readName(data, open + 1)
+		local name, cursor = readName(data, open + 1)
 
 		if name == "" then
 			error("invalid XML tag")
 		end
 
-		local attributes: {[string]: string} = {}
-		local cursor = afterName
+		local attributes = {}
 		local selfClosing = false
 
-		while cursor <= length do
+		while cursor <= #data do
 			cursor = skipWhitespace(data, cursor)
 
 			if string.sub(data, cursor, cursor) == "/" then
-				selfClosing = true
 				cursor += 1
 				cursor = skipWhitespace(data, cursor)
 
@@ -758,6 +883,7 @@ local function parseXml(data: string): XmlElement
 					error("invalid XML self-closing tag")
 				end
 
+				selfClosing = true
 				cursor += 1
 				break
 			end
@@ -823,22 +949,20 @@ local function parseXml(data: string): XmlElement
 	return root
 end
 
---// returns an element's direct text content.
+--// returns trimmed direct text from an XML element.
 local function text(element: XmlElement?, default: string?): string
 	if not element then
 		return default or ""
 	end
 
-	local value = element.text
-
-	if value == "" then
+	if element.text == "" then
 		return default or ""
 	end
 
-	return string.gsub(value, "^%s*(.-)%s*$", "%1")
+	return string.gsub(element.text, "^%s*(.-)%s*$", "%1")
 end
 
---// returns the first direct child matching a tag.
+--// finds a direct child element by name.
 local function child(element: XmlElement?, name: string): XmlElement?
 	if not element then
 		return nil
@@ -853,42 +977,49 @@ local function child(element: XmlElement?, name: string): XmlElement?
 	return nil
 end
 
---// returns text from a named child.
-local function childText(element: XmlElement?, name: string, default: string?): string
+--// reads trimmed text from a named direct child.
+local function childText(
+	element: XmlElement?,
+	name: string,
+	default: string?
+): string
 	return text(child(element, name), default)
 end
 
---// parses a floating-point XML value.
+--// parses a floating-point XML number.
 local function numberValue(value: string?, default: number?): number
-	local resultDefault = default or 0
-	local valueString = string.lower(string.gsub(value or "", "^%s*(.-)%s*$", "%1"))
+	local fallback = default or 0
+	local cleaned = string.lower(
+		string.gsub(value or "", "^%s*(.-)%s*$", "%1")
+	)
 
-	if valueString == "" then
-		return resultDefault
+	if cleaned == "" then
+		return fallback
 	end
 
-	if valueString == "nan" then
+	if cleaned == "nan" then
 		return 0 / 0
 	end
 
-	if valueString == "inf" or valueString == "+inf" or valueString == "infinity" or valueString == "+infinity" then
+	if cleaned == "inf" or cleaned == "+inf"
+		or cleaned == "infinity" or cleaned == "+infinity" then
 		return math.huge
 	end
 
-	if valueString == "-inf" or valueString == "-infinity" then
+	if cleaned == "-inf" or cleaned == "-infinity" then
 		return -math.huge
 	end
 
-	return tonumber(valueString) or resultDefault
+	return tonumber(cleaned) or fallback
 end
 
---// parses an integer XML value.
+--// parses a normal integer XML value.
 local function integerValue(value: string?, default: number?): number
-	local resultDefault = default or 0
+	local fallback = default or 0
 	local cleaned = string.gsub(value or "", "^%s*(.-)%s*$", "%1")
 
 	if cleaned == "" then
-		return resultDefault
+		return fallback
 	end
 
 	local result = tonumber(cleaned)
@@ -897,17 +1028,21 @@ local function integerValue(value: string?, default: number?): number
 		return math.floor(result)
 	end
 
-	return resultDefault
+	return fallback
 end
 
 --// parses an XML boolean.
 local function booleanValue(value: string?): boolean
-	local cleaned = string.lower(string.gsub(value or "", "^%s*(.-)%s*$", "%1"))
+	local cleaned = string.lower(
+		string.gsub(value or "", "^%s*(.-)%s*$", "%1")
+	)
 
-	return cleaned == "1" or cleaned == "true" or cleaned == "yes"
+	return cleaned == "1"
+		or cleaned == "true"
+		or cleaned == "yes"
 end
 
---// reads a ContentId-style XML value.
+--// reads ContentId and Content XML forms.
 local function contentText(element: XmlElement?): string
 	if not element then
 		return ""
@@ -919,15 +1054,13 @@ local function contentText(element: XmlElement?): string
 		return direct
 	end
 
-	local url = child(element, "url")
-
-	return text(url)
+	return text(child(element, "url"))
 end
 
---// decodes base64 into raw bytes.
+--// decodes base64 into a byte string.
 local function base64Decode(value: string): string
 	local alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-	local reverse: {[string]: number} = {}
+	local reverse = {}
 
 	for i = 1, #alphabet do
 		reverse[string.sub(alphabet, i, i)] = i - 1
@@ -936,7 +1069,7 @@ local function base64Decode(value: string): string
 	local cleaned = string.gsub(value, "%s+", "")
 	local output = {}
 	local accumulator = 0
-	local bits = 0
+	local bitCount = 0
 
 	for i = 1, #cleaned do
 		local character = string.sub(cleaned, i, i)
@@ -946,11 +1079,17 @@ local function base64Decode(value: string): string
 
 			if number ~= nil then
 				accumulator = accumulator * 64 + number
-				bits += 6
+				bitCount += 6
 
-				if bits >= 8 then
-					bits -= 8
-					table.insert(output, string.char(math.floor(accumulator / 2 ^ bits) % 256))
+				if bitCount >= 8 then
+					bitCount -= 8
+
+					table.insert(
+						output,
+						string.char(
+							math.floor(accumulator / 2 ^ bitCount) % 256
+						)
+					)
 				end
 			end
 		end
@@ -959,11 +1098,12 @@ local function base64Decode(value: string): string
 	return table.concat(output)
 end
 
---// calculates MD5 for shared-string chunk entries.
+--// returns the MD5 digest used by the SSTR chunk.
 local function md5(value: string): string
 	local bytes = {string.byte(value, 1, #value)}
 	local originalLength = #bytes
-	local bitLengthLow = (originalLength * 8) % 4294967296
+
+	local bitLengthLow = (originalLength * 8) % U32
 	local bitLengthHigh = math.floor(originalLength / 536870912)
 
 	table.insert(bytes, 0x80)
@@ -973,11 +1113,17 @@ local function md5(value: string): string
 	end
 
 	for shift = 0, 24, 8 do
-		table.insert(bytes, math.floor(bitLengthLow / 2 ^ shift) % 256)
+		table.insert(
+			bytes,
+			math.floor(bitLengthLow / 2 ^ shift) % 256
+		)
 	end
 
 	for shift = 0, 24, 8 do
-		table.insert(bytes, math.floor(bitLengthHigh / 2 ^ shift) % 256)
+		table.insert(
+			bytes,
+			math.floor(bitLengthHigh / 2 ^ shift) % 256
+		)
 	end
 
 	local a0 = 0x67452301
@@ -986,10 +1132,25 @@ local function md5(value: string): string
 	local d0 = 0x10325476
 
 	local shifts = {
-		7,12,17,22, 7,12,17,22, 7,12,17,22, 7,12,17,22,
-		5,9,14,20, 5,9,14,20, 5,9,14,20, 5,9,14,20,
-		4,11,16,23, 4,11,16,23, 4,11,16,23, 4,11,16,23,
-		6,10,15,21, 6,10,15,21, 6,10,15,21, 6,10,15,21,
+		7,12,17,22,
+		7,12,17,22,
+		7,12,17,22,
+		7,12,17,22,
+
+		5,9,14,20,
+		5,9,14,20,
+		5,9,14,20,
+		5,9,14,20,
+
+		4,11,16,23,
+		4,11,16,23,
+		4,11,16,23,
+		4,11,16,23,
+
+		6,10,15,21,
+		6,10,15,21,
+		6,10,15,21,
+		6,10,15,21,
 	}
 
 	local k = {
@@ -1011,6 +1172,7 @@ local function md5(value: string): string
 		0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
 	}
 
+	--// rotates a 32-bit value left.
 	local function leftRotate(value: number, amount: number): number
 		return bit32.bor(
 			bit32.lshift(value, amount),
@@ -1041,52 +1203,66 @@ local function md5(value: string): string
 			local g
 
 			if i < 16 then
-				f = bit32.bor(bit32.band(b, c), bit32.band(bit32.bnot(b), d))
+				f = bit32.bor(
+					bit32.band(b, c),
+					bit32.band(bit32.bnot(b), d)
+				)
+
 				g = i
 			elseif i < 32 then
-				f = bit32.bor(bit32.band(d, b), bit32.band(bit32.bnot(d), c))
+				f = bit32.bor(
+					bit32.band(d, b),
+					bit32.band(bit32.bnot(d), c)
+				)
+
 				g = (5 * i + 1) % 16
 			elseif i < 48 then
 				f = bit32.bxor(b, c, d)
 				g = (3 * i + 5) % 16
 			else
-				f = bit32.bxor(c, bit32.bor(b, bit32.bnot(d)))
+				f = bit32.bxor(
+					c,
+					bit32.bor(b, bit32.bnot(d))
+				)
+
 				g = (7 * i) % 16
 			end
 
 			local temp = d
-			local sum = (a + f + k[i + 1] + words[g + 1]) % 4294967296
+			local sum = (a + f + k[i + 1] + words[g + 1]) % U32
 
 			d = c
 			c = b
-			b = (b + leftRotate(sum, shifts[i + 1])) % 4294967296
+			b = (b + leftRotate(sum, shifts[i + 1])) % U32
 			a = temp
 		end
 
-		a0 = (a0 + a) % 4294967296
-		b0 = (b0 + b) % 4294967296
-		c0 = (c0 + c) % 4294967296
-		d0 = (d0 + d) % 4294967296
+		a0 = (a0 + a) % U32
+		b0 = (b0 + b) % U32
+		c0 = (c0 + c) % U32
+		d0 = (d0 + d) % U32
 	end
 
 	local result = {}
 
 	for _, value in ipairs({a0, b0, c0, d0}) do
 		for shift = 0, 24, 8 do
-			table.insert(result, string.char(math.floor(value / 2 ^ shift) % 256))
+			table.insert(
+				result,
+				string.char(math.floor(value / 2 ^ shift) % 256)
+			)
 		end
 	end
 
 	return table.concat(result)
 end
 
---// creates an LZ4 block containing literals only.
+--// creates the literal-only LZ4 block used by the Python converter.
 local function lz4LiteralBlock(data: string): string
 	local length = #data
 	local output = createWriter(length + 16)
-	local literalLength = math.min(length, 15)
 
-	writeU8(output, literalLength * 16)
+	writeU8(output, math.min(length, 15) * 16)
 
 	if length >= 15 then
 		local remaining = length - 15
@@ -1104,8 +1280,12 @@ local function lz4LiteralBlock(data: string): string
 	return writerString(output)
 end
 
---// creates an RBXL chunk.
-local function makeChunk(signature: string, payload: string, compression: string): string
+--// creates one RBXL binary chunk.
+local function makeChunk(
+	signature: string,
+	payload: string,
+	compression: string
+): string
 	local output = createWriter(#payload + 32)
 
 	writeBytes(output, signature)
@@ -1119,21 +1299,21 @@ local function makeChunk(signature: string, payload: string, compression: string
 		return writerString(output)
 	end
 
-	if compression ~= "lz4" then
-		error("Luau implementation supports only lz4 and none compression")
+	if compression == "lz4" then
+		local compressed = lz4LiteralBlock(payload)
+
+		writeU32(output, #compressed)
+		writeU32(output, #payload)
+		writeU32(output, 0)
+		writeBytes(output, compressed)
+
+		return writerString(output)
 	end
 
-	local compressed = lz4LiteralBlock(payload)
-
-	writeU32(output, #compressed)
-	writeU32(output, #payload)
-	writeU32(output, 0)
-	writeBytes(output, compressed)
-
-	return writerString(output)
+	error("zstd compression is unavailable in this Luau implementation")
 end
 
---// parses the SharedStrings table from the XML root.
+--// parses the root SharedStrings table.
 local function parseSharedStrings(root: XmlElement): {[string]: string}
 	local table = {}
 
@@ -1154,10 +1334,12 @@ local function parseSharedStrings(root: XmlElement): {[string]: string}
 	return table
 end
 
---// recursively visits XML Items and creates instance records.
-local function parseInstances(root: XmlElement): ({Instance}, {[string]: Instance})
+--// parses all Roblox Item elements into instances.
+local function parseInstances(
+	root: XmlElement
+): ({Instance}, {[string]: Instance})
 	local roots = {}
-	local byReferent: {[string]: Instance} = {}
+	local byReferent = {}
 	local order = 0
 
 	local function visit(item: XmlElement, parent: Instance?)
@@ -1172,8 +1354,6 @@ local function parseInstances(root: XmlElement): ({Instance}, {[string]: Instanc
 			error("duplicate referent: " .. referent)
 		end
 
-		order += 1
-
 		local instance: Instance = {
 			className = className,
 			referent = referent,
@@ -1185,6 +1365,7 @@ local function parseInstances(root: XmlElement): ({Instance}, {[string]: Instanc
 			order = order,
 		}
 
+		order += 1
 		byReferent[referent] = instance
 
 		if parent then
@@ -1220,16 +1401,16 @@ local function parseInstances(root: XmlElement): ({Instance}, {[string]: Instanc
 		end
 	end
 
-	for _, childElement in ipairs(root.children) do
-		if localName(childElement.tag) == "Item" then
-			visit(childElement, nil)
+	for _, element in ipairs(root.children) do
+		if localName(element.tag) == "Item" then
+			visit(element, nil)
 		end
 	end
 
 	return roots, byReferent
 end
 
---// produces the same depth-first postorder used by the Python converter.
+--// produces the same iterative depth-first postorder as Python.
 local function postorder(roots: {Instance}): {Instance}
 	local output = {}
 	local stack = {}
@@ -1265,8 +1446,11 @@ local function postorder(roots: {Instance}): {Instance}
 	return output
 end
 
---// parses a Vector-like XML value.
-local function vector(element: XmlElement?, names: {string}): {number}
+--// parses an XML vector.
+local function vector(
+	element: XmlElement?,
+	names: {string}
+): {number}
 	local values = table.create(#names)
 
 	for i, name in ipairs(names) do
@@ -1278,33 +1462,48 @@ end
 
 --// parses a UDim value.
 local function parseUdim(element: XmlElement): (number, number)
-	return numberValue(childText(element, "Scale", "0")), integerValue(childText(element, "Offset", "0"))
+	return
+		numberValue(childText(element, "Scale", "0")),
+		integerValue(childText(element, "Offset", "0"))
 end
 
 --// parses a UDim2 value.
-local function parseUdim2(element: XmlElement): (number, number, number, number)
+local function parseUdim2(
+	element: XmlElement
+): (number, number, number, number)
 	return
-		numberValue(childText(element, "XS", childText(element, "XScale", "0"))),
-		numberValue(childText(element, "YS", childText(element, "YScale", "0"))),
-		integerValue(childText(element, "XO", childText(element, "XOffset", "0"))),
-		integerValue(childText(element, "YO", childText(element, "YOffset", "0")))
+		numberValue(
+			childText(element, "XS", childText(element, "XScale", "0"))
+		),
+		numberValue(
+			childText(element, "YS", childText(element, "YScale", "0"))
+		),
+		integerValue(
+			childText(element, "XO", childText(element, "XOffset", "0"))
+		),
+		integerValue(
+			childText(element, "YO", childText(element, "YOffset", "0"))
+		)
 end
 
---// parses a CFrame.
-local function parseCFrame(element: XmlElement): ({number}, {number})
-	local position = vector(element, {"X", "Y", "Z"})
-	local matrix = vector(element, {
-		"R00","R01","R02",
-		"R10","R11","R12",
-		"R20","R21","R22",
-	})
-
-	return position, matrix
+--// parses a CFrame position and rotation matrix.
+local function parseCFrame(
+	element: XmlElement
+): ({number}, {number})
+	return
+		vector(element, {"X", "Y", "Z"}),
+		vector(element, {
+			"R00","R01","R02",
+			"R10","R11","R12",
+			"R20","R21","R22",
+		})
 end
 
---// resolves a CFrame rotation matrix to its compact Roblox rotation id.
-local function parseMatrixId(matrix: {number}): (number, {number})
-	local rounded = {}
+--// resolves a CFrame rotation matrix to its canonical rotation id.
+local function parseMatrixId(
+	matrix: {number}
+): (number, {number})
+	local rounded = table.create(9)
 	local key = ""
 
 	for i, value in ipairs(matrix) do
@@ -1336,14 +1535,98 @@ local function parseMatrixId(matrix: {number}): (number, {number})
 	return 0, matrix
 end
 
---// gets a property's element or nil.
-local function getElement(instance: Instance, propertyName: string): XmlElement?
+--// returns the property element for one instance.
+local function getElement(
+	instance: Instance,
+	propertyName: string
+): XmlElement?
 	local property = instance.properties[propertyName]
 
 	return property and property.element or nil
 end
 
---// encodes one group of properties into its RBXL TypeID and payload.
+--// writes NumberSequence keypoints exactly in the same little-endian layout.
+local function encodeNumberSequence(
+	elements: {XmlElement?}
+): string
+	local output = createWriter()
+
+	for _, element in ipairs(elements) do
+		local keypoints = {}
+
+		if element then
+			for _, keypoint in ipairs(element.children) do
+				local tag = string.lower(localName(keypoint.tag))
+
+				if tag == "keypoint"
+					or tag == "numbersequencekeypoint" then
+					table.insert(keypoints, {
+						numberValue(childText(keypoint, "Time", "0")),
+						numberValue(childText(keypoint, "Value", "0")),
+						numberValue(childText(keypoint, "Envelope", "0")),
+					})
+				end
+			end
+		end
+
+		writeU32(output, #keypoints)
+
+		for _, values in ipairs(keypoints) do
+			writeF32(output, values[1])
+			writeF32(output, values[2])
+			writeF32(output, values[3])
+		end
+	end
+
+	return writerString(output)
+end
+
+--// writes ColorSequence keypoints exactly in the same little-endian layout.
+local function encodeColorSequence(
+	elements: {XmlElement?}
+): string
+	local output = createWriter()
+
+	for _, element in ipairs(elements) do
+		local keypoints = {}
+
+		if element then
+			for _, keypoint in ipairs(element.children) do
+				local tag = string.lower(localName(keypoint.tag))
+
+				if tag == "keypoint"
+					or tag == "colorsequencekeypoint" then
+
+					local color =
+						child(keypoint, "Color3")
+						or child(keypoint, "Color")
+						or keypoint
+
+					table.insert(keypoints, {
+						numberValue(childText(keypoint, "Time", "0")),
+						numberValue(childText(color, "R", "0")),
+						numberValue(childText(color, "G", "0")),
+						numberValue(childText(color, "B", "0")),
+					})
+				end
+			end
+		end
+
+		writeU32(output, #keypoints)
+
+		for _, values in ipairs(keypoints) do
+			writeF32(output, values[1])
+			writeF32(output, values[2])
+			writeF32(output, values[3])
+			writeF32(output, values[4])
+			writeF32(output, 0)
+		end
+	end
+
+	return writerString(output)
+end
+
+--// encodes one grouped Roblox property.
 local function encodeValues(
 	tag: string,
 	propertyName: string,
@@ -1353,6 +1636,7 @@ local function encodeValues(
 	className: string,
 	sharedStringTable: {[string]: string}
 ): (number?, string?)
+
 	tag = PROPERTY_TYPE_OVERRIDES[propertyName] or tag
 
 	if FORCE_CONTENT_ID_STRING[className .. "." .. propertyName] then
@@ -1363,14 +1647,17 @@ local function encodeValues(
 		tag = "ContentId"
 	end
 
-	local elements = {}
+	local elements = table.create(#group)
 
 	for _, instance in ipairs(group) do
-		table.insert(elements, getElement(instance, propertyName))
+		table.insert(
+			elements,
+			getElement(instance, propertyName)
+		)
 	end
 
 	if tag == "string" or tag == "ProtectedString" then
-		local output = createWriter(#group * 8)
+		local output = createWriter()
 
 		for _, element in ipairs(elements) do
 			writeString(output, text(element))
@@ -1380,7 +1667,7 @@ local function encodeValues(
 	end
 
 	if tag == "ContentId" then
-		local output = createWriter(#group * 16)
+		local output = createWriter()
 
 		for _, element in ipairs(elements) do
 			writeString(output, contentText(element))
@@ -1390,89 +1677,25 @@ local function encodeValues(
 	end
 
 	if tag == "SecurityCapabilities" then
-		local values = {}
+		local values = table.create(#elements)
 
-		for _, element in ipairs(elements) do
-			table.insert(values, integerValue(text(element)))
+		for i, element in ipairs(elements) do
+			values[i] = parseInt64(text(element))
 		end
 
-		local output = createWriter(#values * 8)
+		local output = createWriter(#elements * 8)
+
 		writeInterleavedI64(output, values)
 
 		return T_SECURITY_CAPABILITIES, writerString(output)
 	end
 
 	if tag == "NumberSequence" then
-		local output = createWriter()
-
-		for _, element in ipairs(elements) do
-			local keypoints = {}
-
-			if element then
-				for _, keypoint in ipairs(element.children) do
-					local keypointTag = string.lower(localName(keypoint.tag))
-
-					if keypointTag == "keypoint" or keypointTag == "numbersequencekeypoint" then
-						table.insert(keypoints, {
-							numberValue(childText(keypoint, "Time", "0")),
-							numberValue(childText(keypoint, "Value", "0")),
-							numberValue(childText(keypoint, "Envelope", "0")),
-						})
-					end
-				end
-			end
-
-			writeU32(output, #keypoints)
-
-			for _, values in ipairs(keypoints) do
-				writeF32(output, values[1])
-				writeF32(output, values[2])
-				writeF32(output, values[3])
-			end
-		end
-
-		return T_NUMBERSEQUENCE, writerString(output)
+		return T_NUMBERSEQUENCE, encodeNumberSequence(elements)
 	end
 
 	if tag == "ColorSequence" then
-		local output = createWriter()
-
-		for _, element in ipairs(elements) do
-			local keypoints = {}
-
-			if element then
-				for _, keypoint in ipairs(element.children) do
-					local keypointTag = string.lower(localName(keypoint.tag))
-
-					if keypointTag == "keypoint" or keypointTag == "colorsequencekeypoint" then
-						local color = child(keypoint, "Color3") or child(keypoint, "Color")
-
-						if not color then
-							color = keypoint
-						end
-
-						table.insert(keypoints, {
-							numberValue(childText(keypoint, "Time", "0")),
-							numberValue(childText(color, "R", "0")),
-							numberValue(childText(color, "G", "0")),
-							numberValue(childText(color, "B", "0")),
-						})
-					end
-				end
-			end
-
-			writeU32(output, #keypoints)
-
-			for _, values in ipairs(keypoints) do
-				writeF32(output, values[1])
-				writeF32(output, values[2])
-				writeF32(output, values[3])
-				writeF32(output, values[4])
-				writeF32(output, 0)
-			end
-		end
-
-		return T_COLORSEQUENCE, writerString(output)
+		return T_COLORSEQUENCE, encodeColorSequence(elements)
 	end
 
 	if tag == "Content" then
@@ -1526,39 +1749,39 @@ local function encodeValues(
 	end
 
 	if tag == "int" then
-		local values = {}
+		local values = table.create(#elements)
 
-		for _, element in ipairs(elements) do
-			table.insert(values, integerValue(text(element)))
+		for i, element in ipairs(elements) do
+			values[i] = integerValue(text(element))
 		end
 
-		local output = createWriter(#values * 4)
+		local output = createWriter(#elements * 4)
 		writeInterleavedI32(output, values)
 
 		return T_INT, writerString(output)
 	end
 
 	if tag == "int64" then
-		local values = {}
+		local values = table.create(#elements)
 
-		for _, element in ipairs(elements) do
-			table.insert(values, integerValue(text(element)))
+		for i, element in ipairs(elements) do
+			values[i] = parseInt64(text(element))
 		end
 
-		local output = createWriter(#values * 8)
+		local output = createWriter(#elements * 8)
 		writeInterleavedI64(output, values)
 
 		return T_INT64, writerString(output)
 	end
 
 	if tag == "float" then
-		local values = {}
+		local values = table.create(#elements)
 
-		for _, element in ipairs(elements) do
-			table.insert(values, numberValue(text(element)))
+		for i, element in ipairs(elements) do
+			values[i] = numberValue(text(element))
 		end
 
-		local output = createWriter(#values * 4)
+		local output = createWriter(#elements * 4)
 		writeInterleavedF32(output, values)
 
 		return T_FLOAT, writerString(output)
@@ -1575,26 +1798,26 @@ local function encodeValues(
 	end
 
 	if tag == "token" then
-		local values = {}
+		local values = table.create(#elements)
 
-		for _, element in ipairs(elements) do
-			table.insert(values, integerValue(text(element)))
+		for i, element in ipairs(elements) do
+			values[i] = integerValue(text(element))
 		end
 
-		local output = createWriter(#values * 4)
+		local output = createWriter(#elements * 4)
 		writeInterleavedU32(output, values)
 
 		return T_TOKEN, writerString(output)
 	end
 
 	if tag == "BrickColor" then
-		local values = {}
+		local values = table.create(#elements)
 
-		for _, element in ipairs(elements) do
-			table.insert(values, integerValue(text(element)))
+		for i, element in ipairs(elements) do
+			values[i] = integerValue(text(element))
 		end
 
-		local output = createWriter(#values * 4)
+		local output = createWriter(#elements * 4)
 		writeInterleavedU32(output, values)
 
 		return T_BRICKCOLOR, writerString(output)
@@ -1606,11 +1829,22 @@ local function encodeValues(
 		local b = {}
 
 		for _, element in ipairs(elements) do
-			local packed = integerValue(text(element))
+			local packed = integerValue(text(element), 0)
 
-			table.insert(r, bit32.band(bit32.rshift(packed, 16), 0xff))
-			table.insert(g, bit32.band(bit32.rshift(packed, 8), 0xff))
-			table.insert(b, bit32.band(packed, 0xff))
+			table.insert(
+				r,
+				bit32.band(bit32.rshift(packed, 16), 0xff)
+			)
+
+			table.insert(
+				g,
+				bit32.band(bit32.rshift(packed, 8), 0xff)
+			)
+
+			table.insert(
+				b,
+				bit32.band(packed, 0xff)
+			)
 		end
 
 		local output = createWriter(#elements * 3)
@@ -1692,8 +1926,15 @@ local function encodeValues(
 		local output = createWriter(#elements * 4)
 
 		for _, element in ipairs(elements) do
-			writeI16(output, integerValue(childText(element, "X", "0")))
-			writeI16(output, integerValue(childText(element, "Y", "0")))
+			writeI16(
+				output,
+				integerValue(childText(element, "X", "0"))
+			)
+
+			writeI16(
+				output,
+				integerValue(childText(element, "Y", "0"))
+			)
 		end
 
 		return T_VECTOR2INT16, writerString(output)
@@ -1703,9 +1944,20 @@ local function encodeValues(
 		local output = createWriter(#elements * 6)
 
 		for _, element in ipairs(elements) do
-			writeI16(output, integerValue(childText(element, "X", "0")))
-			writeI16(output, integerValue(childText(element, "Y", "0")))
-			writeI16(output, integerValue(childText(element, "Z", "0")))
+			writeI16(
+				output,
+				integerValue(childText(element, "X", "0"))
+			)
+
+			writeI16(
+				output,
+				integerValue(childText(element, "Y", "0"))
+			)
+
+			writeI16(
+				output,
+				integerValue(childText(element, "Z", "0"))
+			)
 		end
 
 		return T_VECTOR3INT16, writerString(output)
@@ -1733,7 +1985,8 @@ local function encodeValues(
 		local xs, ys, xo, yo = {}, {}, {}, {}
 
 		for _, element in ipairs(elements) do
-			local xScale, yScale, xOffset, yOffset = parseUdim2(element)
+			local xScale, yScale, xOffset, yOffset =
+				parseUdim2(element)
 
 			table.insert(xs, xScale)
 			table.insert(ys, yScale)
@@ -1765,6 +2018,7 @@ local function encodeValues(
 		end
 
 		local output = createWriter(#elements * 4)
+
 		writeReferents(output, ids)
 
 		return T_REFERENCE, writerString(output)
@@ -1790,7 +2044,10 @@ local function encodeValues(
 					local bit = bits[localName(face.tag)]
 
 					if bit and booleanValue(text(face)) then
-						mask = bit32.bor(mask, bit32.lshift(1, bit))
+						mask = bit32.bor(
+							mask,
+							bit32.lshift(1, bit)
+						)
 					end
 				end
 			end
@@ -1818,7 +2075,10 @@ local function encodeValues(
 					local bit = bits[localName(axis.tag)]
 
 					if bit and booleanValue(text(axis)) then
-						mask = bit32.bor(mask, bit32.lshift(1, bit))
+						mask = bit32.bor(
+							mask,
+							bit32.lshift(1, bit)
+						)
 					end
 				end
 			end
@@ -1833,12 +2093,71 @@ local function encodeValues(
 		local output = createWriter(#elements * 24)
 
 		for _, element in ipairs(elements) do
-			writeF32(output, numberValue(childText(element, "originX", childText(element, "OriginX", "0"))))
-			writeF32(output, numberValue(childText(element, "originY", childText(element, "OriginY", "0"))))
-			writeF32(output, numberValue(childText(element, "originZ", childText(element, "OriginZ", "0"))))
-			writeF32(output, numberValue(childText(element, "directionX", childText(element, "DirectionX", "0"))))
-			writeF32(output, numberValue(childText(element, "directionY", childText(element, "DirectionY", "0"))))
-			writeF32(output, numberValue(childText(element, "directionZ", childText(element, "DirectionZ", "0"))))
+			writeF32(
+				output,
+				numberValue(
+					childText(
+						element,
+						"originX",
+						childText(element, "OriginX", "0")
+					)
+				)
+			)
+
+			writeF32(
+				output,
+				numberValue(
+					childText(
+						element,
+						"originY",
+						childText(element, "OriginY", "0")
+					)
+				)
+			)
+
+			writeF32(
+				output,
+				numberValue(
+					childText(
+						element,
+						"originZ",
+						childText(element, "OriginZ", "0")
+					)
+				)
+			)
+
+			writeF32(
+				output,
+				numberValue(
+					childText(
+						element,
+						"directionX",
+						childText(element, "DirectionX", "0")
+					)
+				)
+			)
+
+			writeF32(
+				output,
+				numberValue(
+					childText(
+						element,
+						"directionY",
+						childText(element, "DirectionY", "0")
+					)
+				)
+			)
+
+			writeF32(
+				output,
+				numberValue(
+					childText(
+						element,
+						"directionZ",
+						childText(element, "DirectionZ", "0")
+					)
+				)
+			)
 		end
 
 		return T_RAY, writerString(output)
@@ -1849,7 +2168,8 @@ local function encodeValues(
 		local x, y, z = {}, {}, {}
 
 		for _, element in ipairs(elements) do
-			local position, matrix
+			local position
+			local matrix
 
 			if element then
 				position, matrix = parseCFrame(element)
@@ -1873,7 +2193,9 @@ local function encodeValues(
 			table.insert(z, position[3])
 		end
 
-		local output = createWriter(rotations.position + #elements * 12)
+		local output = createWriter(
+			rotations.position + #elements * 12
+		)
 
 		writeBytes(output, writerString(rotations))
 		writeInterleavedF32(output, x)
@@ -1887,8 +2209,15 @@ local function encodeValues(
 		local output = createWriter(#elements * 8)
 
 		for _, element in ipairs(elements) do
-			writeF32(output, numberValue(childText(element, "min", "0")))
-			writeF32(output, numberValue(childText(element, "max", "0")))
+			writeF32(
+				output,
+				numberValue(childText(element, "min", "0"))
+			)
+
+			writeF32(
+				output,
+				numberValue(childText(element, "max", "0"))
+			)
 		end
 
 		return T_NUMBERRANGE, writerString(output)
@@ -1901,17 +2230,28 @@ local function encodeValues(
 			local minElement = child(element, "Min")
 			local maxElement = child(element, "Max")
 
+			local values
+
 			if minElement and maxElement then
-				table.insert(minX, numberValue(childText(minElement, "X", "0")))
-				table.insert(minY, numberValue(childText(minElement, "Y", "0")))
-				table.insert(maxX, numberValue(childText(maxElement, "X", "0")))
-				table.insert(maxY, numberValue(childText(maxElement, "Y", "0")))
+				values = {
+					numberValue(childText(minElement, "X", "0")),
+					numberValue(childText(minElement, "Y", "0")),
+					numberValue(childText(maxElement, "X", "0")),
+					numberValue(childText(maxElement, "Y", "0")),
+				}
 			else
-				table.insert(minX, numberValue(childText(element, "MinX", "0")))
-				table.insert(minY, numberValue(childText(element, "MinY", "0")))
-				table.insert(maxX, numberValue(childText(element, "MaxX", "0")))
-				table.insert(maxY, numberValue(childText(element, "MaxY", "0")))
+				values = {
+					numberValue(childText(element, "MinX", "0")),
+					numberValue(childText(element, "MinY", "0")),
+					numberValue(childText(element, "MaxX", "0")),
+					numberValue(childText(element, "MaxY", "0")),
+				}
 			end
+
+			table.insert(minX, values[1])
+			table.insert(minY, values[2])
+			table.insert(maxX, values[3])
+			table.insert(maxY, values[4])
 		end
 
 		local output = createWriter(#elements * 16)
@@ -1932,19 +2272,20 @@ local function encodeValues(
 			local raw = sharedStringTable[key] or ""
 
 			if sharedMap[raw] == nil then
-				local count = 0
+				local nextId = 0
 
 				for _ in pairs(sharedMap) do
-					count += 1
+					nextId += 1
 				end
 
-				sharedMap[raw] = count
+				sharedMap[raw] = nextId
 			end
 
 			table.insert(ids, sharedMap[raw])
 		end
 
 		local output = createWriter(#elements * 4)
+
 		writeInterleavedU32(output, ids)
 
 		return T_SHAREDSTRING, writerString(output)
@@ -1954,18 +2295,23 @@ local function encodeValues(
 		local output = createWriter(#elements * 16)
 
 		for _, element in ipairs(elements) do
-			local index = integerValue(childText(element, "Index", "0"))
-			local timeValue = integerValue(childText(element, "Time", "0"))
-			local randomValue = childText(element, "Random", "0")
-			local random = tonumber(randomValue, 16) or 0
+			local index = integerValue(
+				childText(element, "Index", "0")
+			)
 
-			if random >= 9223372036854775808 then
-				random -= 18446744073709551616
-			end
+			local timeValue = integerValue(
+				childText(element, "Time", "0")
+			)
+
+			local randomValue = childText(
+				element,
+				"Random",
+				"0"
+			)
 
 			writeBEU32(output, index)
 			writeBEU32(output, timeValue)
-			writeBEU64(output, random % 18446744073709551616)
+			writeBEU64(output, parseHex64(randomValue))
 		end
 
 		return T_UNIQUEID, writerString(output)
@@ -1975,10 +2321,29 @@ local function encodeValues(
 		local output = createWriter()
 
 		for _, element in ipairs(elements) do
-			writeString(output, childText(element, "Family", ""))
-			writeU16(output, integerValue(childText(element, "Weight", "400")))
-			writeU8(output, integerValue(childText(element, "Style", "0")) % 256)
-			writeString(output, childText(element, "CachedFaceId", ""))
+			writeString(
+				output,
+				childText(element, "Family", "")
+			)
+
+			writeU16(
+				output,
+				integerValue(
+					childText(element, "Weight", "400")
+				)
+			)
+
+			writeU8(
+				output,
+				integerValue(
+					childText(element, "Style", "0")
+				)
+			)
+
+			writeString(
+				output,
+				childText(element, "CachedFaceId", "")
+			)
 		end
 
 		return T_FONT, writerString(output)
@@ -1992,19 +2357,53 @@ local function encodeValues(
 
 			if element then
 				custom =
-					booleanValue(childText(element, "CustomPhysics", ""))
-					or booleanValue(element.attributes.CustomPhysics)
+					booleanValue(
+						childText(element, "CustomPhysics", "")
+					)
+					or booleanValue(
+						element.attributes.CustomPhysics
+					)
 			end
 
 			if not custom then
 				writeU8(output, 0)
 			else
 				writeU8(output, 1)
-				writeF32(output, numberValue(childText(element, "Density", "0.7")))
-				writeF32(output, numberValue(childText(element, "Friction", "0.3")))
-				writeF32(output, numberValue(childText(element, "Elasticity", "0.5")))
-				writeF32(output, numberValue(childText(element, "FrictionWeight", "1")))
-				writeF32(output, numberValue(childText(element, "ElasticityWeight", "1")))
+
+				writeF32(
+					output,
+					numberValue(
+						childText(element, "Density", "0.7")
+					)
+				)
+
+				writeF32(
+					output,
+					numberValue(
+						childText(element, "Friction", "0.3")
+					)
+				)
+
+				writeF32(
+					output,
+					numberValue(
+						childText(element, "Elasticity", "0.5")
+					)
+				)
+
+				writeF32(
+					output,
+					numberValue(
+						childText(element, "FrictionWeight", "1")
+					)
+				)
+
+				writeF32(
+					output,
+					numberValue(
+						childText(element, "ElasticityWeight", "1")
+					)
+				)
 			end
 		end
 
@@ -2014,24 +2413,29 @@ local function encodeValues(
 	return nil
 end
 
---// builds the final RBXL/RBXM binary.
+--// converts the parsed instance tree into RBXL/RBXM binary.
 local function convert(
 	roots: {Instance},
 	compression: string,
 	sharedStringTable: {[string]: string}
 ): string
 	local ordered = postorder(roots)
-	local idMap: {[string]: number} = {}
+	local idMap = {}
 
 	for i, instance in ipairs(ordered) do
 		idMap[instance.referent] = i - 1
 	end
 
-	local grouped: {[string]: {Instance}} = {}
+	local grouped = {}
 
 	for _, instance in ipairs(ordered) do
-		grouped[instance.className] = grouped[instance.className] or {}
-		table.insert(grouped[instance.className], instance)
+		grouped[instance.className] =
+			grouped[instance.className] or {}
+
+		table.insert(
+			grouped[instance.className],
+			instance
+		)
 	end
 
 	local classNames = {}
@@ -2042,19 +2446,20 @@ local function convert(
 
 	table.sort(classNames)
 
-	local typeIds: {[string]: number} = {}
+	local typeIds = {}
 
 	for i, className in ipairs(classNames) do
 		typeIds[className] = i - 1
 	end
 
-	local sharedMap: {[string]: number} = {}
+	local sharedMap = {}
 	local sharedValues = {}
 
 	for _, instance in ipairs(ordered) do
 		for _, property in pairs(instance.properties) do
 			if property.tag == "SharedString" then
-				local raw = sharedStringTable[text(property.element)] or ""
+				local raw =
+					sharedStringTable[text(property.element)] or ""
 
 				if sharedMap[raw] == nil then
 					sharedMap[raw] = #sharedValues
@@ -2064,7 +2469,9 @@ local function convert(
 		end
 	end
 
-	local output = createWriter(math.max(1024, #ordered * 64))
+	local output = createWriter(
+		math.max(1024, #ordered * 64)
+	)
 
 	writeBytes(output, MAGIC)
 	writeU16(output, VERSION)
@@ -2084,38 +2491,63 @@ local function convert(
 			writeBString(payload, raw)
 		end
 
-		writeBytes(output, makeChunk("SSTR", writerString(payload), compression))
+		writeBytes(
+			output,
+			makeChunk(
+				"SSTR",
+				writerString(payload),
+				compression
+			)
+		)
 	end
 
+	--// INST chunks.
 	for _, className in ipairs(classNames) do
 		local group = grouped[className]
+		local isService =
+			ROBLOX_SERVICE_CLASSES[className] == true
+
 		local payload = createWriter()
 
 		writeU32(payload, typeIds[className])
 		writeString(payload, className)
-		writeU8(payload, ROBLOX_SERVICE_CLASSES[className] and 1 or 0)
+		writeU8(payload, isService and 1 or 0)
 		writeU32(payload, #group)
 
 		local referents = {}
 
 		for _, instance in ipairs(group) do
-			table.insert(referents, idMap[instance.referent])
+			table.insert(
+				referents,
+				idMap[instance.referent]
+			)
 		end
 
 		writeReferents(payload, referents)
 
-		if ROBLOX_SERVICE_CLASSES[className] then
+		if isService then
 			for _, instance in ipairs(group) do
-				writeU8(payload, instance.parent == nil and 1 or 0)
+				writeU8(
+					payload,
+					instance.parent == nil and 1 or 0
+				)
 			end
 		end
 
-		writeBytes(output, makeChunk("INST", writerString(payload), compression))
+		writeBytes(
+			output,
+			makeChunk(
+				"INST",
+				writerString(payload),
+				compression
+			)
+		)
 	end
 
+	--// PROP chunks.
 	for _, className in ipairs(classNames) do
 		local group = grouped[className]
-		local names: {[string]: boolean} = {}
+		local names = {}
 
 		for _, instance in ipairs(group) do
 			for propertyName in pairs(instance.properties) do
@@ -2137,8 +2569,10 @@ local function convert(
 			local sample: Property? = nil
 
 			for _, instance in ipairs(group) do
-				if instance.properties[propertyName] then
-					sample = instance.properties[propertyName]
+				local property = instance.properties[propertyName]
+
+				if property then
+					sample = property
 					break
 				end
 			end
@@ -2155,21 +2589,53 @@ local function convert(
 				)
 
 				if typeId and values then
-					local payload = createWriter(#values + 64)
+					local payload = createWriter(
+						#values + 64
+					)
 
-					writeU32(payload, typeIds[className])
-					writeString(payload, propertyName)
+					writeU32(
+						payload,
+						typeIds[className]
+					)
+
+					writeString(
+						payload,
+						propertyName
+					)
+
 					writeU8(payload, typeId)
 					writeBytes(payload, values)
 
-					writeBytes(output, makeChunk("PROP", writerString(payload), compression))
+					writeBytes(
+						output,
+						makeChunk(
+							"PROP",
+							writerString(payload),
+							compression
+						)
+					)
+				else
+					warn(
+						string.format(
+							"unsupported property %s.%s (<%s>); skipped",
+							className,
+							propertyName,
+							sample.tag
+						)
+					)
 				end
 			end
 		end
 
-		local payload = createWriter(#group * 16 + 32)
+		local payload = createWriter(
+			#group * 16 + 32
+		)
 
-		writeU32(payload, typeIds[className])
+		writeU32(
+			payload,
+			typeIds[className]
+		)
+
 		writeString(payload, "Name")
 		writeU8(payload, T_STRING)
 
@@ -2177,41 +2643,86 @@ local function convert(
 			writeString(payload, instance.name)
 		end
 
-		writeBytes(output, makeChunk("PROP", writerString(payload), compression))
+		writeBytes(
+			output,
+			makeChunk(
+				"PROP",
+				writerString(payload),
+				compression
+			)
+		)
 	end
 
+	--// PRNT.
 	local children = {}
 	local parents = {}
 
 	for _, instance in ipairs(ordered) do
-		table.insert(children, idMap[instance.referent])
+		table.insert(
+			children,
+			idMap[instance.referent]
+		)
 
 		if instance.parent then
-			table.insert(parents, idMap[instance.parent.referent])
+			table.insert(
+				parents,
+				idMap[instance.parent.referent]
+			)
 		else
 			table.insert(parents, -1)
 		end
 	end
 
-	local prnt = createWriter(#ordered * 8 + 5)
+	local prnt = createWriter(
+		#ordered * 8 + 5
+	)
 
 	writeU8(prnt, 0)
 	writeU32(prnt, #ordered)
 	writeReferents(prnt, children)
 	writeReferents(prnt, parents)
 
-	writeBytes(output, makeChunk("PRNT", writerString(prnt), compression))
-	writeBytes(output, makeChunk(END_SIGNATURE, END_PAYLOAD, "none"))
+	writeBytes(
+		output,
+		makeChunk(
+			"PRNT",
+			writerString(prnt),
+			compression
+		)
+	)
+
+	writeBytes(
+		output,
+		makeChunk(
+			END_SIGNATURE,
+			END_PAYLOAD,
+			"none"
+		)
+	)
 
 	return writerString(output)
 end
 
 -- >> main
---// converts Roblox RBXLX/RBMX XML data directly into RBXL/RBXM binary data.
---// @params: xmlData string -- complete RBXLX/RBMX XML document.
---// @returns: string -- binary RBXL/RBXM data.
-local function Convert(xmlData: string): string
-	assert(type(xmlData) == "string", "xmlData must be a string")
+--// converts Roblox RBXLX/RBMX XML text into RBXL/RBXM binary text.
+--// @params: xmlData string -- complete Roblox XML document.
+--// @params: compression string? -- lz4 or none. defaults to lz4.
+--// @returns: string -- binary Roblox file data.
+local function Convert(
+	xmlData: string,
+	compression: string?
+): string
+	assert(
+		type(xmlData) == "string",
+		"xmlData must be a string"
+	)
+
+	compression = compression or "lz4"
+
+	assert(
+		compression == "lz4" or compression == "none",
+		"compression must be 'lz4' or 'none'"
+	)
 
 	local root = parseXml(xmlData)
 
@@ -2226,9 +2737,12 @@ local function Convert(xmlData: string): string
 		error("XML contains no <Item> instances")
 	end
 
-	return convert(roots, "lz4", sharedStringTable)
+	return convert(
+		roots,
+		compression,
+		sharedStringTable
+	)
 end
 
 return Convert
-
 -- >> end << --
