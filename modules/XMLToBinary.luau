@@ -1057,42 +1057,66 @@ local function contentText(element: XmlElement?): string
 	return text(child(element, "url"))
 end
 
---// decodes base64 into a byte string.
+--// yes there's executor apis for this im too lazy
+--// decodes base64 into a byte string
 local function base64Decode(value: string): string
 	local alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-	local reverse = {}
+	local reverse = table.create(256)
 
 	for i = 1, #alphabet do
-		reverse[string.sub(alphabet, i, i)] = i - 1
+		reverse[string.byte(alphabet, i)] = i - 1
 	end
 
 	local cleaned = string.gsub(value, "%s+", "")
-	local output = {}
-	local accumulator = 0
-	local bitCount = 0
+	local output = table.create(math.floor(#cleaned * 3 / 4))
+	local outputSize = 0
+	local position = 1
 
-	for i = 1, #cleaned do
-		local character = string.sub(cleaned, i, i)
+	while position <= #cleaned do
+		local a = string.byte(cleaned, position)
+		local b = string.byte(cleaned, position + 1)
+		local c = string.byte(cleaned, position + 2)
+		local d = string.byte(cleaned, position + 3)
 
-		if character ~= "=" then
-			local number = reverse[character]
+		local av = a and reverse[a]
+		local bv = b and reverse[b]
 
-			if number ~= nil then
-				accumulator = accumulator * 64 + number
-				bitCount += 6
-
-				if bitCount >= 8 then
-					bitCount -= 8
-
-					table.insert(
-						output,
-						string.char(
-							math.floor(accumulator / 2 ^ bitCount) % 256
-						)
-					)
-				end
-			end
+		if av == nil or bv == nil then
+			break
 		end
+
+		local cv = c and reverse[c] or 0
+		local dv = d and reverse[d] or 0
+
+		local first = bit32.bor(
+			bit32.lshift(av, 2),
+			bit32.rshift(bv, 4)
+		)
+
+		outputSize += 1
+		output[outputSize] = string.char(bit32.band(first, 0xff))
+
+		if c ~= string.byte("=") then
+			local second = bit32.bor(
+				bit32.lshift(bit32.band(bv, 0x0f), 4),
+				bit32.rshift(cv, 2)
+			)
+
+			outputSize += 1
+			output[outputSize] = string.char(bit32.band(second, 0xff))
+		end
+
+		if d ~= string.byte("=") then
+			local third = bit32.bor(
+				bit32.lshift(bit32.band(cv, 0x03), 6),
+				dv
+			)
+
+			outputSize += 1
+			output[outputSize] = string.char(bit32.band(third, 0xff))
+		end
+
+		position += 4
 	end
 
 	return table.concat(output)
