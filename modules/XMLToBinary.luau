@@ -403,6 +403,7 @@ local function writeInterleavedI32(writer: Writer, values: {number}, transformed
 		{},
 		{},
 		{},
+		{},
 	}
 
 	for i = 1, count do
